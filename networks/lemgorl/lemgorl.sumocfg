@@ -1,0 +1,11 @@
+<?xml version="1.0" ?>
+<configuration xmlns="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
+  <input>
+    <net-file value="lemgorl.net.xml"/>
+    <route-files value="demand_uniform.rou.xml"/>
+  </input>
+  <time>
+    <begin value="0"/>
+    <end value="3600"/>
+  </time>
+</configuration>
