@@ -1,0 +1,4 @@
+name: fixed_time
+type: non_rl
+green_duration: 30
+yellow_duration: 3
