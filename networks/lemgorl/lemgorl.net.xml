@@ -1,0 +1,39 @@
+<?xml version="1.0" ?>
+<net xmlns="http://sumo.dlr.de/xsd/net_file.xsd" version="1.16">
+  <location netOffset="0.00,0.00" convBoundary="0.00,0.00,2000.00,500.00" origBoundary="0.00,0.00,2000.00,500.00" projParameter="!"/>
+  <junction id="intersection_0" type="traffic_light" x="0.00" y="250.00" incLanes="" intLanes="" shape=""/>
+  <tlLogic id="intersection_0" type="static" programID="0" offset="0">
+    <phase duration="30" state="GGggrrrrGGggrrrr"/>
+    <phase duration="3" state="yyggrrrryyggrrrr"/>
+    <phase duration="30" state="rrrrGGggrrrrGGgg"/>
+    <phase duration="3" state="rrrryyggrrrryygg"/>
+  </tlLogic>
+  <junction id="intersection_1" type="traffic_light" x="400.00" y="250.00" incLanes="" intLanes="" shape=""/>
+  <tlLogic id="intersection_1" type="static" programID="0" offset="0">
+    <phase duration="30" state="GGggrrrrGGggrrrr"/>
+    <phase duration="3" state="yyggrrrryyggrrrr"/>
+    <phase duration="30" state="rrrrGGggrrrrGGgg"/>
+    <phase duration="3" state="rrrryyggrrrryygg"/>
+  </tlLogic>
+  <junction id="intersection_2" type="traffic_light" x="800.00" y="250.00" incLanes="" intLanes="" shape=""/>
+  <tlLogic id="intersection_2" type="static" programID="0" offset="0">
+    <phase duration="30" state="GGggrrrrGGggrrrr"/>
+    <phase duration="3" state="yyggrrrryyggrrrr"/>
+    <phase duration="30" state="rrrrGGggrrrrGGgg"/>
+    <phase duration="3" state="rrrryyggrrrryygg"/>
+  </tlLogic>
+  <junction id="intersection_3" type="traffic_light" x="1200.00" y="250.00" incLanes="" intLanes="" shape=""/>
+  <tlLogic id="intersection_3" type="static" programID="0" offset="0">
+    <phase duration="30" state="GGggrrrrGGggrrrr"/>
+    <phase duration="3" state="yyggrrrryyggrrrr"/>
+    <phase duration="30" state="rrrrGGggrrrrGGgg"/>
+    <phase duration="3" state="rrrryyggrrrryygg"/>
+  </tlLogic>
+  <junction id="intersection_4" type="traffic_light" x="1600.00" y="250.00" incLanes="" intLanes="" shape=""/>
+  <tlLogic id="intersection_4" type="static" programID="0" offset="0">
+    <phase duration="30" state="GGggrrrrGGggrrrr"/>
+    <phase duration="3" state="yyggrrrryyggrrrr"/>
+    <phase duration="30" state="rrrrGGggrrrrGGgg"/>
+    <phase duration="3" state="rrrryyggrrrryygg"/>
+  </tlLogic>
+</net>
