@@ -1,0 +1,11 @@
+name: phase1_baseline_lemgo
+description: "Phase 1 Baseline evaluation on LemgoRL 5-intersection network"
+demand_profiles:
+  - uniform
+noise_scenarios:
+  - clean
+  - mild
+  - moderate
+  - severe
+  - extreme
+eval_episodes_per_seed: 5
