@@ -1,0 +1,6 @@
+name: actuated
+type: non_rl
+min_green: 5
+max_green: 50
+yellow_duration: 3
+queue_threshold: 1.0
