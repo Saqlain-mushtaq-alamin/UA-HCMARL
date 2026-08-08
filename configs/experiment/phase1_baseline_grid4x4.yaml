@@ -1,0 +1,14 @@
+name: phase1_baseline_grid4x4
+description: "Phase 1 Baseline evaluation on 4x4 Grid network across all 4 demand profiles and 5 noise degradation levels"
+demand_profiles:
+  - uniform
+  - morning_peak
+  - evening_peak
+  - incident
+noise_scenarios:
+  - clean
+  - mild
+  - moderate
+  - severe
+  - extreme
+eval_episodes_per_seed: 5
