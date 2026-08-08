@@ -1,0 +1,12 @@
+<?xml version="1.0" ?>
+<configuration xmlns="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
+  <input>
+    <net-file value="grid4x4.net.xml"/>
+    <route-files value="demand_uniform.rou.xml"/>
+  </input>
+  <time>
+    <begin value="0"/>
+    <end value="3600"/>
+    <step-length value="1.0"/>
+  </time>
+</configuration>
