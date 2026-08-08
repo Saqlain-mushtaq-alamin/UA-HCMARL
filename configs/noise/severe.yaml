@@ -1,0 +1,5 @@
+scenario: severe
+d1_p: 0.3
+d2_p: 0.2
+d3_b: 0.2
+heterogeneous: true
