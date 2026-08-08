@@ -1,0 +1,5 @@
+<?xml version="1.0" ?>
+<routes xmlns="http://sumo.dlr.de/xsd/routes_file.xsd">
+  <vType id="car" accel="2.6" decel="4.5" sigma="0.5" length="5.0" maxSpeed="13.89"/>
+  <flow id="flow_arterial" type="car" begin="0" end="3600" vehsPerHour="800"/>
+</routes>
