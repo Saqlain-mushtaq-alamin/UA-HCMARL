@@ -1,0 +1,13 @@
+# Main Hydra Configuration File
+defaults:
+  - env: grid4x4
+  - agent: fixed_time
+  - noise: clean
+  - experiment: phase1_baseline_grid4x4
+  - _self_
+
+seed: 42
+num_seeds: 5
+output_dir: experiments
+use_wandb: false
+wandb_project: UA-HCMARL
