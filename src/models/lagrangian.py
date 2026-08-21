@@ -1,17 +1,20 @@
 """
-PID-Lagrangian Cost Estimator Module (Phase 1 / Layer 2)
+PID-Lagrangian Cost Estimator Module (Phase 1 / Phase 3 / Blueprint §5)
 
 Implements Confidence-Modulated PID Lagrangian multiplier updates (Blueprint §5):
     Standard:  lambda_j <- max(0, lambda_j + alpha * (C_hat_j - d_j))
     Ours:      lambda_j <- max(0, lambda_j + alpha * (C_hat_j - d_j * gamma(sigma_hat, B)))
 """
 
+from typing import Optional, Union, Tuple
 import numpy as np
+import torch
+import torch.nn as nn
 
 
 class PIDLagrangianMultiplier:
     """
-    PID-Lagrangian multiplier manager with confidence modulation gamma(sigma_hat, B).
+    PID-Lagrangian multiplier manager with optional confidence modulation gamma(sigma_hat, B).
     """
 
     def __init__(
@@ -22,25 +25,30 @@ class PIDLagrangianMultiplier:
         kd: float = 0.01,
         initial_lambda: float = 0.0,
         max_lambda: float = 100.0,
+        use_confidence_modulation: bool = True,
     ):
         self.num_constraints = num_constraints
         self.kp = kp
         self.ki = ki
         self.kd = kd
         self.max_lambda = max_lambda
+        self.use_confidence_modulation = use_confidence_modulation
 
         self.lambdas = np.full(num_constraints, initial_lambda, dtype=np.float32)
         self.integral_errors = np.zeros(num_constraints, dtype=np.float32)
         self.prev_errors = np.zeros(num_constraints, dtype=np.float32)
 
-    def compute_gamma(self, sigma_hat: float, budget: float) -> float:
+    def compute_gamma(self, sigma_hat: float, budget: float = 50.0) -> float:
         """
-        Confidence-modulation factor gamma(sigma_hat, B) in (0, 1).
-        Low confidence + small budget -> gamma -> 0 -> stricter constraints.
+        Confidence-modulation factor gamma(sigma_hat, B) in (0, 1].
+        High uncertainty sigma_hat -> gamma -> 0 -> stricter effective constraint thresholds.
         """
+        if not self.use_confidence_modulation:
+            return 1.0
+
         w1, w2, bias = -2.0, 0.05, 0.0
-        log_sigma = np.log(max(1e-4, sigma_hat))
-        logit = w1 * log_sigma + w2 * budget + bias
+        log_sigma = np.log(max(1e-4, float(sigma_hat)))
+        logit = w1 * log_sigma + w2 * float(budget) + bias
         gamma = 1.0 / (1.0 + np.exp(-logit))
         return float(np.clip(gamma, 0.01, 1.0))
 
@@ -69,3 +77,25 @@ class PIDLagrangianMultiplier:
         self.lambdas = np.clip(self.lambdas + delta, 0.0, self.max_lambda)
 
         return self.lambdas
+
+
+class ConfidenceModulatedLagrangian(nn.Module):
+    """
+    PyTorch Parameterized Confidence-Modulated PID Lagrangian for Layer 2 Constrained Workers.
+    """
+
+    def __init__(self, num_constraints: int = 3, kp: float = 0.05, ki: float = 0.005, kd: float = 0.01):
+        super().__init__()
+        self.num_constraints = num_constraints
+        self.kp = kp
+        self.ki = ki
+        self.kd = kd
+
+        self.w1 = nn.Parameter(torch.tensor(-2.0))
+        self.w2 = nn.Parameter(torch.tensor(0.05))
+        self.bias = nn.Parameter(torch.tensor(0.0))
+
+    def compute_gamma(self, sigma_hat: torch.Tensor, budget: torch.Tensor) -> torch.Tensor:
+        log_sigma = torch.log(torch.clamp(sigma_hat, min=1e-4))
+        logit = self.w1 * log_sigma + self.w2 * budget + self.bias
+        return torch.sigmoid(logit)
