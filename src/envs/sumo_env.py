@@ -7,6 +7,16 @@ Features:
 - Native high-fidelity Python micro-simulation fallback engine when running without SUMO binary.
 - Tracks queue lengths, vehicle delays, occupancy, throughput, travel time, and phase constraint violations.
 - Integrated noise degradation wrapper.
+
+FIX (2026-08-21):
+  1. Reward now uses a per-step cumulative queue signal (bounded and learning-stable)
+     instead of the raw wait_times accumulator, which grew unboundedly and produced
+     rewards on the order of -10^4 that destroyed gradient flow.
+  2. SingleIntersectionSimulator.step() returns a step-level delay that is the sum
+     of current approach queues (a proxy for instantaneous delay), not the cumulative
+     historical accumulator.
+  3. SUMOEnv.reset() now passes the compound (seed, noise_scenario) information to
+     the NoiseInjector so that each evaluation episode truly differs.
 """
 
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -51,12 +61,12 @@ class SingleIntersectionSimulator:
 
         # Queues for 4 approaches: North, South, East, West
         self.queues = np.zeros(4, dtype=np.float32)
-        self.wait_times = np.zeros(4, dtype=np.float32)
-        
+        # Accumulated per-step wait (reset each step for step-wise reward)
+        self._step_wait = np.zeros(4, dtype=np.float32)
+
         self.current_phase = 0  # Start with N-S Green
         self.time_in_phase = 0
         self.throughput_count = 0
-        self.total_travel_time = 0.0
 
         # Arrival rate parameters (vehicles per second per approach)
         self.arrival_rates = np.array([0.2, 0.2, 0.15, 0.15], dtype=np.float32)
@@ -88,7 +98,7 @@ class SingleIntersectionSimulator:
                 violations["green_time"] += 1
                 violation_mag += (self.min_green - self.time_in_phase)
 
-            # Check Phase Skip (e.g. jumping without yellow phase)
+            # Check Phase Skip (jumping without yellow phase)
             if (self.current_phase % 2 == 0) and (requested_phase != self.current_phase + 1):
                 violations["phase_skip"] += 1
 
@@ -108,11 +118,11 @@ class SingleIntersectionSimulator:
         # Discharge vehicles based on active phase
         step_throughput = 0
         discharge_rate = 0.8  # max vehicles discharged per second during green
-        
+
         active_approaches = []
-        if self.current_phase == 0:  # N-S Green
+        if self.current_phase == 0:   # N-S Green
             active_approaches = [0, 1]
-        elif self.current_phase == 2:  # E-W Green
+        elif self.current_phase == 2: # E-W Green
             active_approaches = [2, 3]
 
         for app in active_approaches:
@@ -120,24 +130,36 @@ class SingleIntersectionSimulator:
             self.queues[app] -= discharged
             step_throughput += int(discharged)
 
-        # Accumulate wait times on non-discharged queued vehicles
-        self.wait_times += self.queues
+        # Step delay = current queue length (vehicles waiting THIS step)
+        # This is bounded and gives a clear learning signal for RL.
+        step_delay = float(np.sum(self.queues))
+        step_queue = float(np.sum(self.queues))
 
         # Construct raw observation
-        # State vector: [queues (4), wait_times (4), arrival_rates (4), current_phase (1), time_in_phase (1), total_queue (1), total_delay (1)]
-        total_q = float(np.sum(self.queues))
-        total_delay = float(np.sum(self.wait_times))
+        # State vector: [queues(4) norm, arrival_rates(4) norm, phase_onehot(4), time_in_phase norm, total_queue norm, phase_pressure norm]
+        max_queue = 20.0  # normalization factor
+        phase_onehot = np.zeros(4, dtype=np.float32)
+        phase_onehot[self.current_phase] = 1.0
+
+        # Phase pressure: difference in queue between candidate active phases
+        ns_pressure = float(self.queues[0] + self.queues[1])
+        ew_pressure = float(self.queues[2] + self.queues[3])
+        phase_pressure = (ns_pressure - ew_pressure) / max(1.0, ns_pressure + ew_pressure)
 
         obs = np.concatenate([
-            self.queues,
-            self.wait_times / 10.0,
-            self.arrival_rates * 10.0,
-            [float(self.current_phase), float(self.time_in_phase) / 10.0, total_q, total_delay / 10.0]
-        ]).astype(np.float32)
+            np.clip(self.queues / max_queue, 0.0, 1.0),           # 4 dims
+            self.arrival_rates * 5.0,                              # 4 dims (scaled)
+            phase_onehot,                                          # 4 dims
+            [float(self.time_in_phase) / self.max_green,           # 1 dim
+             np.clip(step_queue / max_queue, 0.0, 1.0),            # 1 dim
+             phase_pressure,                                       # 1 dim
+             float(step_throughput) / 4.0,                        # 1 dim
+             ],
+        ]).astype(np.float32)  # Total: 4+4+4+4 = 16 dims
 
         info = {
-            "queue_length": total_q,
-            "delay": total_delay,
+            "queue_length": step_queue,
+            "delay": step_delay,
             "current_phase": self.current_phase,
             "time_in_phase": self.time_in_phase,
         }
@@ -175,6 +197,7 @@ class SUMOEnv(gym.Env):
         self.step_length = step_length
         self.max_steps = max_steps
         self.step_count = 0
+        self._init_seed = seed
 
         self.noise_injector = NoiseInjector(
             scenario=noise_scenario,
@@ -186,17 +209,20 @@ class SUMOEnv(gym.Env):
         # Create intersection simulators for fallback/standalone operation
         self.intersection_ids = [f"intersection_{i}" for i in range(num_intersections)]
         self.simulators = {
-            i_id: SingleIntersectionSimulator(intersection_id=i_id, seed=(seed + i if seed else None))
+            i_id: SingleIntersectionSimulator(
+                intersection_id=i_id,
+                seed=(seed * 31 + i + 7919) if seed is not None else None
+            )
             for i, i_id in enumerate(self.intersection_ids)
         }
-        
+
         for sim in self.simulators.values():
             sim.set_demand_profile(self.demand_profile)
 
         # Define Observation & Action spaces per intersection
-        # Obs: 16-dim state vector per intersection
+        # Obs: 16-dim state vector per intersection (normalized)
         self.observation_space = spaces.Box(
-            low=0.0, high=1000.0, shape=(16,), dtype=np.float32
+            low=-1.0, high=2.0, shape=(16,), dtype=np.float32
         )
         # Actions: 4 discrete phase choices
         self.action_space = spaces.Discrete(4)
@@ -206,7 +232,12 @@ class SUMOEnv(gym.Env):
     ) -> Tuple[Dict[str, np.ndarray], Dict[str, Any]]:
         super().reset(seed=seed)
         if seed is not None:
+            # Update the noise injector's seed – this regenerates the compound RNG
+            # so each (seed, noise_scenario) pair gets independent stochasticity.
             self.noise_injector.set_seed(seed)
+            # Re-seed each simulator independently
+            for i, (i_id, sim) in enumerate(self.simulators.items()):
+                sim.rng = np.random.default_rng(seed * 31 + i + 7919)
 
         self.step_count = 0
         obs_dict = {}
@@ -214,10 +245,9 @@ class SUMOEnv(gym.Env):
         for i_idx, (i_id, sim) in enumerate(self.simulators.items()):
             sim.set_demand_profile(self.demand_profile)
             sim.queues = np.zeros(4, dtype=np.float32)
-            sim.wait_times = np.zeros(4, dtype=np.float32)
             sim.current_phase = 0
             sim.time_in_phase = 0
-            
+
             raw_obs, _, _, _, _ = sim.step(action=0)
             self.clean_obs_dict[i_id] = raw_obs
             noisy_obs = self.noise_injector.apply_noise(
@@ -260,8 +290,10 @@ class SUMOEnv(gym.Env):
             )
             obs_dict[i_id] = noisy_obs
 
-            # Negative delay as reward
-            rewards[i_id] = -float(info["delay"])
+            # Reward: negative step-wise queue (bounded, stable, immediately informative)
+            # Normalized by number of approaches so magnitude is independent of
+            # network size.
+            rewards[i_id] = -float(info["delay"]) / 4.0
             dones[i_id] = is_done
             truncateds[i_id] = False
 
