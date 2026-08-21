@@ -1,11 +1,17 @@
 """
-Layer 1 — Belief-State Encoder (BSE) Module Skeleton (Phase 1 / Blueprint §4)
+Layer 1 — Belief-State Encoder (BSE) Module (Phase 3 / Blueprint §4)
 
-Architecture: GRU-KalmanNet (inspired by Q-Net)
-Output: Denoised belief state b_hat + Uncertainty score sigma_hat
+Architecture: GRU-KalmanNet
+Outputs:
+- Denoised belief state b_hat_i(t) in R^d
+- Calibrated uncertainty score sigma_hat_i(t) in R_+ (Softplus output)
+Features:
+- Learned Kalman gain K(t) in [0, 1]^d
+- Prediction-correction update: b_hat = (1 - K) * f(b_prev) + K * o_current
+- Auxiliary supervised loss: L_BSE = MSE(b_hat, s_true) + beta * NLL(sigma_hat, |b_hat - s_true|)
 """
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,9 +20,9 @@ import torch.nn.functional as F
 class GRUKalmanNet(nn.Module):
     """
     GRU-KalmanNet Belief-State Encoder (Layer 1).
-    Encodes raw noisy observations o_i(t) over history window H into:
-        - Cleaned belief state b_hat_i(t) in R^d
-        - Calibrated uncertainty score sigma_hat_i(t) in R_+ (softplus)
+    Encodes raw noisy observation history o_i(t-H:t) into:
+        - Denoised belief state b_hat_i(t)
+        - Calibrated uncertainty score sigma_hat_i(t)
     """
 
     def __init__(
@@ -32,7 +38,7 @@ class GRUKalmanNet(nn.Module):
         self.belief_dim = belief_dim
         self.history_len = history_len
 
-        # GRU temporal encoder
+        # GRU temporal context encoder
         self.gru = nn.GRU(
             input_size=raw_obs_dim,
             hidden_size=hidden_dim,
@@ -40,31 +46,36 @@ class GRUKalmanNet(nn.Module):
             batch_first=True,
         )
 
-        # Kalman Gain estimator network MLP_K
-        self.kalman_mlp = nn.Sequential(
+        # Learned Kalman gain estimator K(t) in [0, 1]
+        self.kalman_gain_net = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, raw_obs_dim * belief_dim),
+            nn.Linear(hidden_dim, belief_dim),
+            nn.Sigmoid(),
         )
 
-        # Observation projection & Belief update
-        self.belief_head = nn.Linear(hidden_dim, belief_dim)
+        # Transition model f(b̂(t-1))
+        self.transition_net = nn.Linear(belief_dim, belief_dim)
 
-        # Uncertainty head sigma_hat (softplus output)
+        # Innovation-aware uncertainty head sigma_hat (Softplus)
         self.uncertainty_head = nn.Sequential(
-            nn.Linear(hidden_dim, 32),
+            nn.Linear(hidden_dim + belief_dim, 32),
             nn.ReLU(),
             nn.Linear(32, 1),
             nn.Softplus(),
         )
 
     def forward(
-        self, obs_history: torch.Tensor, hidden_state: torch.Tensor = None
+        self,
+        obs_history: torch.Tensor,
+        prev_belief: Optional[torch.Tensor] = None,
+        hidden_state: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Args:
-            obs_history: (batch_size, sequence_length, raw_obs_dim)
-            hidden_state: optional GRU hidden state
+            obs_history: Tensor of shape (batch_size, sequence_length, raw_obs_dim)
+            prev_belief: Optional previous belief state (batch_size, belief_dim)
+            hidden_state: Optional GRU hidden state
 
         Returns:
             b_hat: Denoised belief state (batch_size, belief_dim)
@@ -74,11 +85,26 @@ class GRUKalmanNet(nn.Module):
         if obs_history.dim() == 2:
             obs_history = obs_history.unsqueeze(1)
 
-        gru_out, next_hidden = self.gru(obs_history, hidden_state)
-        last_h = gru_out[:, -1, :]  # (batch_size, hidden_dim)
+        batch_size = obs_history.size(0)
+        current_obs = obs_history[:, -1, :]
 
-        b_hat = self.belief_head(last_h)
-        sigma_hat = self.uncertainty_head(last_h) + 1e-4
+        gru_out, next_hidden = self.gru(obs_history, hidden_state)
+        z_last = gru_out[:, -1, :]  # (batch_size, hidden_dim)
+
+        # 1. Learned Kalman gain K(t)
+        kalman_k = self.kalman_gain_net(z_last)
+
+        # 2. Prediction-Correction Update
+        if prev_belief is None:
+            prev_belief = current_obs
+
+        predicted_belief = self.transition_net(prev_belief)
+        b_hat = (1.0 - kalman_k) * predicted_belief + kalman_k * current_obs
+
+        # 3. Innovation-Aware Uncertainty Score
+        innovation = torch.abs(current_obs - b_hat)
+        uncertainty_input = torch.cat([z_last, innovation], dim=-1)
+        sigma_hat = self.uncertainty_head(uncertainty_input) + 1e-4
 
         return b_hat, sigma_hat, next_hidden
 
@@ -87,15 +113,17 @@ class GRUKalmanNet(nn.Module):
         b_hat: torch.Tensor,
         sigma_hat: torch.Tensor,
         ground_truth_state: torch.Tensor,
-        beta: float = 0.5,
+        beta: float = 0.1,
     ) -> Dict[str, torch.Tensor]:
-        """Auxiliary supervised loss L_BSE = MSE(b_hat, s_true) + beta * NLL(sigma_hat, |b_hat - s_true|)."""
+        """
+        Auxiliary loss: L_BSE = MSE(b_hat, s_true) + beta * NLL(sigma_hat, |b_hat - s_true|)
+        """
         mse_loss = F.mse_loss(b_hat, ground_truth_state)
-        err = torch.abs(b_hat - ground_truth_state).mean(dim=-1, keepdim=True)
-        
+        error = torch.abs(b_hat - ground_truth_state).mean(dim=-1, keepdim=True)
+
         # NLL loss for uncertainty calibration
-        nll_loss = (torch.log(sigma_hat) + (err ** 2) / (2 * (sigma_hat ** 2))).mean()
-        
+        nll_loss = (torch.log(sigma_hat) + (error ** 2) / (2.0 * (sigma_hat ** 2))).mean()
+
         total_loss = mse_loss + beta * nll_loss
         return {
             "loss_bse": total_loss,
