@@ -181,6 +181,7 @@ class SUMOEnv(gym.Env):
             num_intersections=num_intersections,
             seed=seed,
         )
+        self.clean_obs_dict: Dict[str, np.ndarray] = {}
 
         # Create intersection simulators for fallback/standalone operation
         self.intersection_ids = [f"intersection_{i}" for i in range(num_intersections)]
@@ -218,12 +219,16 @@ class SUMOEnv(gym.Env):
             sim.time_in_phase = 0
             
             raw_obs, _, _, _, _ = sim.step(action=0)
+            self.clean_obs_dict[i_id] = raw_obs
             noisy_obs = self.noise_injector.apply_noise(
                 raw_obs, agent_id=i_id, intersection_idx=i_idx
             )
             obs_dict[i_id] = noisy_obs
 
         return obs_dict, {"step": 0}
+
+    def _get_clean_observation(self, agent_id: str) -> np.ndarray:
+        return self.clean_obs_dict.get(agent_id, np.zeros(16, dtype=np.float32))
 
     def step(
         self, actions: Dict[str, int]
@@ -248,6 +253,7 @@ class SUMOEnv(gym.Env):
         for i_idx, (i_id, sim) in enumerate(self.simulators.items()):
             act = actions.get(i_id, sim.current_phase)
             raw_obs, info, throughput, violations, v_mag = sim.step(act)
+            self.clean_obs_dict[i_id] = raw_obs
 
             noisy_obs = self.noise_injector.apply_noise(
                 raw_obs, agent_id=i_id, intersection_idx=i_idx
