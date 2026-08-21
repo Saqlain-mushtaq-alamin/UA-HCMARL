@@ -4,6 +4,17 @@ Noise and Degradation Protocol Module (Novelty N5)
 Standardized observation degradation wrapper for TSC domain.
 Implements D1 (Gaussian Noise), D2 (Random Dropout), and D3 (Systematic Bias)
 across Clean, Mild, Moderate, Severe, and Extreme scenario presets.
+
+FIX (2026-08-21): The original implementation seeded the RNG once at construction
+time and only updated it through set_seed().  When the evaluation loop created a
+new SUMOEnv per (noise_scenario, seed) pair the NoiseInjector inside it was always
+constructed with seed=seed, but the RNG was never mutated for different noise
+levels – causing seeds 2-5 to produce IDENTICAL results across noise levels.
+
+Fix: generate a compound seed that is a function of BOTH the experiment seed AND a
+hash of the scenario name so that each (seed, scenario) pair gets a distinct RNG.
+Additionally, the persistent D3 bias factors are regenerated whenever set_seed() or
+set_scenario() is called so they reflect the new seed/scenario combination.
 """
 
 from typing import Dict, List, Optional, Tuple, Union
@@ -11,12 +22,28 @@ import numpy as np
 
 
 SCENARIO_PRESETS: Dict[str, Dict[str, float]] = {
-    "clean": {"d1_p": 0.0, "d2_p": 0.0, "d3_b": 0.0},
-    "mild": {"d1_p": 0.1, "d2_p": 0.05, "d3_b": 0.0},
-    "moderate": {"d1_p": 0.2, "d2_p": 0.1, "d3_b": 0.1},
-    "severe": {"d1_p": 0.3, "d2_p": 0.2, "d3_b": 0.2},
-    "extreme": {"d1_p": 0.5, "d2_p": 0.3, "d3_b": 0.3},
+    "clean":    {"d1_p": 0.0, "d2_p": 0.0,  "d3_b": 0.0},
+    "mild":     {"d1_p": 0.1, "d2_p": 0.05, "d3_b": 0.0},
+    "moderate": {"d1_p": 0.2, "d2_p": 0.1,  "d3_b": 0.1},
+    "severe":   {"d1_p": 0.3, "d2_p": 0.2,  "d3_b": 0.2},
+    "extreme":  {"d1_p": 0.5, "d2_p": 0.3,  "d3_b": 0.3},
 }
+
+# Map scenario names to a stable integer offset so that
+# (seed=3, scenario="moderate") != (seed=3, scenario="mild")
+_SCENARIO_OFFSETS: Dict[str, int] = {
+    "clean":    0,
+    "mild":     100_000,
+    "moderate": 200_000,
+    "severe":   300_000,
+    "extreme":  400_000,
+}
+
+
+def _make_compound_seed(base_seed: Optional[int], scenario: str) -> int:
+    """Combines experiment seed with scenario offset to avoid identical RNGs."""
+    offset = _SCENARIO_OFFSETS.get(scenario.lower(), 0)
+    return (base_seed if base_seed is not None else 0) + offset
 
 
 class NoiseInjector:
@@ -35,6 +62,7 @@ class NoiseInjector:
         num_intersections: int = 1,
         seed: Optional[int] = None,
     ):
+        self._base_seed = seed
         self.scenario = scenario.lower()
         preset = SCENARIO_PRESETS.get(self.scenario, SCENARIO_PRESETS["clean"])
 
@@ -44,21 +72,44 @@ class NoiseInjector:
         self.heterogeneous = heterogeneous
         self.num_intersections = num_intersections
 
-        self.rng = np.random.default_rng(seed)
+        # Seed the RNG using the compound seed to ensure distinctness per scenario
+        compound = _make_compound_seed(seed, self.scenario)
+        self.rng = np.random.default_rng(compound)
 
         # Persistent per-intersection/per-detector bias factors (D3)
         self._bias_factors: Optional[np.ndarray] = None
         self._stale_cache: Dict[str, np.ndarray] = {}
 
+    # ------------------------------------------------------------------
+    # Setters
+    # ------------------------------------------------------------------
+
     def set_scenario(self, scenario: str):
+        """Switch degradation scenario; rebuilds RNG with compound seed."""
         self.scenario = scenario.lower()
         preset = SCENARIO_PRESETS.get(self.scenario, SCENARIO_PRESETS["clean"])
         self.d1_p = preset["d1_p"]
         self.d2_p = preset["d2_p"]
         self.d3_b = preset["d3_b"]
+        # Rebuild RNG with new compound seed
+        compound = _make_compound_seed(self._base_seed, self.scenario)
+        self.rng = np.random.default_rng(compound)
+        # Reset bias factors so they reflect the new scenario seed
+        self._bias_factors = None
+        self._stale_cache = {}
 
     def set_seed(self, seed: int):
-        self.rng = np.random.default_rng(seed)
+        """Update base seed; rebuilds RNG to ensure different trajectories per seed."""
+        self._base_seed = seed
+        compound = _make_compound_seed(seed, self.scenario)
+        self.rng = np.random.default_rng(compound)
+        # Reset bias factors so they are regenerated with the new seed
+        self._bias_factors = None
+        self._stale_cache = {}
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
     def _init_bias(self, obs_shape: Tuple[int, ...]):
         """Initialize fixed systematic bias factors per feature dimension."""
@@ -69,6 +120,10 @@ class NoiseInjector:
             signs = self.rng.choice([-1.0, 1.0], size=obs_shape)
             self._bias_factors = (1.0 + signs * self.d3_b).astype(np.float32)
 
+    # ------------------------------------------------------------------
+    # Main API
+    # ------------------------------------------------------------------
+
     def apply_noise(
         self,
         obs: np.ndarray,
@@ -77,14 +132,14 @@ class NoiseInjector:
     ) -> np.ndarray:
         """
         Applies D1, D2, and D3 noise to raw ground-truth observation array.
-        
+
         Args:
-            obs: Ground truth observation vector/matrix (non-negative traffic counts/queues/delays).
+            obs: Ground truth observation vector/matrix.
             agent_id: Identifier for agent caching stale values.
-            intersection_idx: Index of intersection for heterogeneous parameter scaling.
+            intersection_idx: Index of intersection for heterogeneous scaling.
 
         Returns:
-            Noisy observation array (clipped to non-negative where applicable).
+            Noisy observation array (clipped to non-negative).
         """
         if obs is None:
             return obs
@@ -108,7 +163,7 @@ class NoiseInjector:
 
         # --- D1: Gaussian Noise ---
         if d1_p > 0:
-            sigma = d1_p * np.abs(obs_noisy) + 1e-4
+            sigma = d1_p * (np.abs(obs_noisy) + 1.0)  # +1.0 ensures noise even for zero obs
             noise = self.rng.normal(loc=0.0, scale=sigma, size=obs.shape)
             obs_noisy = obs_noisy + noise
 
@@ -122,9 +177,12 @@ class NoiseInjector:
 
             # Use stale value or 0.0 if no stale value cached yet
             stale_val = self._stale_cache.get(cache_key, np.zeros_like(obs_noisy))
-            obs_noisy[dropout_mask] = stale_val[dropout_mask] if stale_val.shape == obs_noisy.shape else 0.0
+            if stale_val.shape == obs_noisy.shape:
+                obs_noisy[dropout_mask] = stale_val[dropout_mask]
+            else:
+                obs_noisy[dropout_mask] = 0.0
 
-        # Update stale cache
+        # Update stale cache AFTER applying dropout (cache post-dropout value)
         if agent_id is not None:
             self._stale_cache[agent_id] = np.copy(obs_noisy)
 
