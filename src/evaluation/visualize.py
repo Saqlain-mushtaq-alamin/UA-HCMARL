@@ -12,7 +12,13 @@ import os
 from typing import Dict, List, Optional
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
+
+try:
+    import seaborn as sns
+    _HAS_SEABORN = True
+except Exception:
+    _HAS_SEABORN = False
+    sns = None
 
 
 def setup_plot_style():
@@ -68,7 +74,7 @@ def plot_baseline_comparison(
     methods = list(metrics_summary.keys())
     values = [metrics_summary[m].get(metric_name, 0.0) for m in methods]
 
-    palette = sns.color_palette("muted", len(methods))
+    palette = sns.color_palette("muted", len(methods)) if _HAS_SEABORN else plt.cm.tab10.colors[:len(methods)]
     bars = ax.bar(methods, values, color=palette, width=0.5, edgecolor="black")
 
     for bar in bars:
