@@ -56,10 +56,13 @@ class MAPPOLCEController:
         self.device = torch.device(device)
 
         self.num_constraints = num_constraints
+        # FIX: Raise constraint limits so early training isn't crushed by penalties.
+        # 0.3 = allow 30% violation rate before Lagrangian activates.  Once the
+        # policy learns basic traffic management, tighten these to 0.1 in later phases.
         self.constraint_limits = (
             np.array(constraint_limits, dtype=np.float32)
             if constraint_limits is not None
-            else np.array([0.05, 0.05, 0.05], dtype=np.float32)
+            else np.array([0.3, 0.3, 0.3], dtype=np.float32)
         )
 
         # PID-Lagrangian multiplier manager
@@ -86,6 +89,11 @@ class MAPPOLCEController:
                 aid: optim.Adam(self.actors[aid].parameters(), lr=lr) for aid in agent_ids
             }
 
+        self.reset_buffers()
+
+    def reset(self, agent_ids=None):
+        """Reset Lagrangian state between episodes to prevent multiplier carry-over."""
+        self.pid_lagrangian.reset()
         self.reset_buffers()
 
     def reset_buffers(self):
@@ -184,16 +192,28 @@ class MAPPOLCEController:
         num_steps = len(rewards)
 
         # Aggregate step costs and update PID-Lagrangian multipliers
-        mean_costs = np.mean(costs, axis=0) if num_steps > 0 else np.zeros(self.num_constraints)
+        # Costs are counts per step (violations), which can be 0–N per step.
+        # Normalize by num_agents and num_constraints to get a rate-like quantity.
+        normalization = max(1.0, float(self.num_agents * self.num_constraints))
+        mean_costs_norm = (np.mean(costs, axis=0) / normalization) if num_steps > 0 else np.zeros(self.num_constraints)
         lambdas = self.pid_lagrangian.update(
-            constraint_costs=mean_costs, constraint_limits=self.constraint_limits
+            constraint_costs=mean_costs_norm,
+            constraint_limits=self.constraint_limits / normalization,
         )
 
         total_lambda = float(np.sum(lambdas))
-        total_costs = np.sum(costs, axis=-1)  # scalar cost per step
+        total_costs_raw = np.sum(costs, axis=-1)  # scalar raw cost per step
 
-        # Penalized combined reward
-        penalized_rewards = rewards - total_lambda * total_costs
+        # FIX: Hard cap penalty at 20% of mean absolute reward magnitude per step.
+        # This ensures the Lagrangian term is a guidance signal, not a dominant loss.
+        mean_abs_reward = float(np.mean(np.abs(rewards))) + 1e-6
+        mean_raw_cost = float(np.mean(np.abs(total_costs_raw))) + 1e-6
+        # penalty_scale: how much to scale total_lambda * cost to fit target budget
+        target_penalty_budget = 0.20 * mean_abs_reward  # 20% of reward magnitude
+        penalty_scale = min(1.0, target_penalty_budget / (total_lambda * mean_raw_cost + 1e-6))
+
+        # Penalized combined reward (bounded)
+        penalized_rewards = rewards - penalty_scale * total_lambda * total_costs_raw
 
         # Compute GAE on Penalized Rewards
         advantages = np.zeros_like(penalized_rewards, dtype=np.float32)
@@ -212,7 +232,7 @@ class MAPPOLCEController:
         else:
             adv_t = adv_t - adv_t.mean()
 
-        cost_returns = torch.tensor(total_costs, dtype=torch.float32, device=self.device)
+        cost_returns = torch.tensor(total_costs_raw, dtype=torch.float32, device=self.device)
 
         # 1. Update Critics
         self.reward_critic.train()
