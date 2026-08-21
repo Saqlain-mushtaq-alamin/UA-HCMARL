@@ -4,6 +4,16 @@ PID-Lagrangian Cost Estimator Module (Phase 1 / Phase 3 / Blueprint §5)
 Implements Confidence-Modulated PID Lagrangian multiplier updates (Blueprint §5):
     Standard:  lambda_j <- max(0, lambda_j + alpha * (C_hat_j - d_j))
     Ours:      lambda_j <- max(0, lambda_j + alpha * (C_hat_j - d_j * gamma(sigma_hat, B)))
+
+FIX (2026-08-21): The original PID gains (kp=0.05, ki=0.005, kd=0.01) were
+far too large, causing the Lagrangian multiplier to spike to its max_lambda cap
+after the very first update and then stay pinned there for the rest of training.
+This made MAPPO-LCE behave like a fully-penalized unconstrained problem rather
+than a lightly guided constrained one.
+
+Corrected gains: kp=0.01, ki=0.001, kd=0.001.  The max_lambda is also reduced
+from 100 to 10 so an occasional burst does not permanently destroy the policy
+gradient.
 """
 
 from typing import Optional, Union, Tuple
@@ -20,11 +30,11 @@ class PIDLagrangianMultiplier:
     def __init__(
         self,
         num_constraints: int = 3,
-        kp: float = 0.05,
-        ki: float = 0.005,
-        kd: float = 0.01,
+        kp: float = 0.01,
+        ki: float = 0.001,
+        kd: float = 0.001,
         initial_lambda: float = 0.0,
-        max_lambda: float = 100.0,
+        max_lambda: float = 10.0,
         use_confidence_modulation: bool = True,
     ):
         self.num_constraints = num_constraints
@@ -37,6 +47,12 @@ class PIDLagrangianMultiplier:
         self.lambdas = np.full(num_constraints, initial_lambda, dtype=np.float32)
         self.integral_errors = np.zeros(num_constraints, dtype=np.float32)
         self.prev_errors = np.zeros(num_constraints, dtype=np.float32)
+
+    def reset(self):
+        """Reset Lagrangian state (call at the start of each new episode)."""
+        self.lambdas[:] = 0.0
+        self.integral_errors[:] = 0.0
+        self.prev_errors[:] = 0.0
 
     def compute_gamma(self, sigma_hat: float, budget: float = 50.0) -> float:
         """
@@ -70,6 +86,8 @@ class PIDLagrangianMultiplier:
 
         error = costs - effective_limits
         self.integral_errors += error
+        # Anti-windup: clip integral term
+        self.integral_errors = np.clip(self.integral_errors, -10.0, 10.0)
         derivative = error - self.prev_errors
         self.prev_errors = np.copy(error)
 
@@ -84,7 +102,7 @@ class ConfidenceModulatedLagrangian(nn.Module):
     PyTorch Parameterized Confidence-Modulated PID Lagrangian for Layer 2 Constrained Workers.
     """
 
-    def __init__(self, num_constraints: int = 3, kp: float = 0.05, ki: float = 0.005, kd: float = 0.01):
+    def __init__(self, num_constraints: int = 3, kp: float = 0.01, ki: float = 0.001, kd: float = 0.001):
         super().__init__()
         self.num_constraints = num_constraints
         self.kp = kp
