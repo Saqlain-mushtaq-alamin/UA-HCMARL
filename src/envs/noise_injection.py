@@ -50,6 +50,13 @@ class NoiseInjector:
         self._bias_factors: Optional[np.ndarray] = None
         self._stale_cache: Dict[str, np.ndarray] = {}
 
+    def set_scenario(self, scenario: str):
+        self.scenario = scenario.lower()
+        preset = SCENARIO_PRESETS.get(self.scenario, SCENARIO_PRESETS["clean"])
+        self.d1_p = preset["d1_p"]
+        self.d2_p = preset["d2_p"]
+        self.d3_b = preset["d3_b"]
+
     def set_seed(self, seed: int):
         self.rng = np.random.default_rng(seed)
 
