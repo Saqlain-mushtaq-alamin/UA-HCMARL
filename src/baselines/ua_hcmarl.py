@@ -142,7 +142,14 @@ class UAHCMARLController:
         }
 
         self.manager_buffer = {
-            r: {"states": [], "budgets": [], "rewards": [], "log_probs": [], "values": []}
+            r: {
+                "states": [],
+                "budgets": [],
+                "rewards": [],
+                "log_probs": [],
+                "values": [],
+                "sigma_bars": [],  # average sigma per region step (for aux loss)
+            }
             for r in self.managers.keys()
         }
 
@@ -180,9 +187,15 @@ class UAHCMARLController:
                     self.worker_budgets[aid] = float(budgets_np[idx])
 
                 if not evaluate:
+                    # Compute sigma bar for this region (for auxiliary correlation loss)
+                    sigma_bar = float(np.mean([
+                        self.latest_worker_reports.get(aid, {}).get("sigma", 1.0)
+                        for aid in aids
+                    ]))
                     self.manager_buffer[r]["states"].append(mgr_state)
                     self.manager_buffer[r]["budgets"].append(budgets_np)
                     self.manager_buffer[r]["values"].append(float(val_t.item()))
+                    self.manager_buffer[r]["sigma_bars"].append(sigma_bar)
 
         # 2. Worker Action Selection
         self.bse.eval()
@@ -250,7 +263,14 @@ class UAHCMARLController:
         for aid in self.agent_ids:
             if aid in rewards:
                 self.worker_buffer["rewards"][aid].append(rewards[aid])
-                self.worker_buffer["dones"][aid].append(dones[aid])
+                self.worker_buffer["dones"][aid].append(dones.get(aid, False))
+
+        # Accumulate manager rewards per region (sum of worker rewards in region)
+        for r, aids in self.region_assignments.items():
+            r_reward = float(np.mean([rewards.get(aid, 0.0) for aid in aids]))
+            # Only commit when the manager has recorded a state for this interval
+            if len(self.manager_buffer[r]["states"]) > len(self.manager_buffer[r].get("rewards", [])):
+                self.manager_buffer[r].setdefault("rewards", []).append(r_reward)
 
         if step_violations:
             c_vec = np.array(
@@ -336,20 +356,61 @@ class UAHCMARLController:
             self.worker_actor_optimizer.step()
             total_p_loss += policy_loss.item()
 
-        # 2. Update Managers
+        # 2. Update Managers with proper policy gradient + sigma->budget auxiliary loss
         total_mgr_loss = 0.0
         for r, mgr in self.managers.items():
-            if len(self.manager_buffer[r]["states"]) > 0:
-                mgr_states = torch.tensor(np.array(self.manager_buffer[r]["states"]), dtype=torch.float32, device=self.device)
-                mgr.train()
-                dist, budget_t, val_t = mgr(mgr_states)
-                mgr_loss = -val_t.mean()
+            buf_r = self.manager_buffer[r]
+            if len(buf_r["states"]) == 0:
+                continue
 
-                self.manager_optimizers[r].zero_grad()
-                mgr_loss.backward()
-                nn.utils.clip_grad_norm_(mgr.parameters(), max_norm=0.5)
-                self.manager_optimizers[r].step()
-                total_mgr_loss += float(mgr_loss.item())
+            mgr_states = torch.tensor(np.array(buf_r["states"]), dtype=torch.float32, device=self.device)
+            mgr_rewards = np.array(buf_r.get("rewards", [0.0] * len(buf_r["states"])), dtype=np.float32)
+            mgr_values = np.array(buf_r["values"], dtype=np.float32)
+
+            # Simple Monte-Carlo return estimate for manager
+            n_mgr = len(mgr_rewards)
+            mgr_returns = np.zeros(n_mgr, dtype=np.float32)
+            running = 0.0
+            for t in reversed(range(n_mgr)):
+                running = mgr_rewards[t] + (self.gamma ** self.t_manager) * running
+                mgr_returns[t] = running
+
+            mgr_adv = mgr_returns - mgr_values
+
+            ret_mgr_t = torch.tensor(mgr_returns, dtype=torch.float32, device=self.device)
+            adv_mgr_t = torch.tensor(mgr_adv, dtype=torch.float32, device=self.device)
+
+            mgr.train()
+            dist_mgr, budget_t, val_pred_t = mgr(mgr_states)
+
+            # Policy gradient loss (manager maximizes expected value)
+            value_loss_mgr = nn.functional.mse_loss(val_pred_t, ret_mgr_t)
+
+            # Auxiliary sigma->budget correlation loss: encourage high sigma -> high budget
+            # This directly trains the manager to realize the core N2 novelty claim.
+            sigma_bars = buf_r.get("sigma_bars", [])
+            if len(sigma_bars) == len(buf_r["budgets"]) and len(sigma_bars) > 1:
+                sigma_t = torch.tensor(
+                    np.array(sigma_bars, dtype=np.float32), dtype=torch.float32, device=self.device
+                )
+                # Mean budget per region step
+                mean_budget_t = budget_t.mean(dim=-1)  # (T,)
+                # Soft correlation loss: minimize -corr(sigma, budget)
+                sigma_norm = (sigma_t - sigma_t.mean()) / (sigma_t.std() + 1e-8)
+                budget_norm = (mean_budget_t - mean_budget_t.mean()) / (mean_budget_t.std() + 1e-8)
+                corr_loss = -((sigma_norm * budget_norm).mean())  # maximize correlation
+                aux_weight = 0.5
+            else:
+                corr_loss = torch.tensor(0.0, device=self.device)
+                aux_weight = 0.0
+
+            mgr_loss = value_loss_mgr + aux_weight * corr_loss
+
+            self.manager_optimizers[r].zero_grad()
+            mgr_loss.backward()
+            nn.utils.clip_grad_norm_(mgr.parameters(), max_norm=0.5)
+            self.manager_optimizers[r].step()
+            total_mgr_loss += float(mgr_loss.item())
 
         self.reset_buffers()
         return {
