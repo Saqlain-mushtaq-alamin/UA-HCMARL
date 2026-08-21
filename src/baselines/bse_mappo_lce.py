@@ -38,7 +38,7 @@ class BSEMAPPOLCEController:
         gae_lambda: float = 0.95,
         clip_ratio: float = 0.2,
         use_confidence_modulation: bool = True,
-        freeze_bse: bool = False,
+        freeze_bse: bool = True,   # Default: keep BSE frozen after supervised pre-training
         device: str = "cpu",
     ):
         self.agent_ids = agent_ids
@@ -71,12 +71,12 @@ class BSEMAPPOLCEController:
         self.reward_critic = MAPPOCentralizedCritic(global_state_dim).to(self.device)
         self.cost_critic = MAPPOCentralizedCritic(global_state_dim).to(self.device)
 
-        # PID-Lagrangian Multiplier
+        # PID-Lagrangian Multiplier (conservative gains to not crush the reward signal)
         self.pid_lagrangian = PIDLagrangianMultiplier(
             num_constraints=3,
-            kp=0.05,
-            ki=0.005,
-            kd=0.01,
+            kp=0.01,
+            ki=0.001,
+            kd=0.001,
             use_confidence_modulation=use_confidence_modulation,
         )
 
@@ -320,25 +320,11 @@ class BSEMAPPOLCEController:
 
             total_policy_loss += policy_loss.item()
 
-        # 3. Fine-tune BSE if unfrozen (Phase C)
+        # BSE fine-tuning is intentionally disabled during RL training.
+        # The GRU-KalmanNet requires correct history sequences (batch, history_len, obs_dim)
+        # which are not available from the flat replay buffer.  Pre-train BSE supervised
+        # before RL starts, then freeze it (freeze_bse=True by default).
         loss_bse_val = 0.0
-        if not self.freeze_bse:
-            self.bse.train()
-            total_bse_loss = torch.tensor(0.0, device=self.device)
-            for aid in self.agent_ids:
-                if len(self.buffer["obs"][aid]) == 0:
-                    continue
-                raw_obs = torch.tensor(
-                    np.array(self.buffer["obs"][aid]), dtype=torch.float32, device=self.device
-                )
-                b_hats, sigmas, _ = self.bse(raw_obs.unsqueeze(1))
-                loss_dict = self.bse.compute_loss(b_hats, sigmas, raw_obs)
-                total_bse_loss = total_bse_loss + loss_dict["loss_bse"]
-
-            self.bse_optimizer.zero_grad()
-            total_bse_loss.backward()
-            self.bse_optimizer.step()
-            loss_bse_val = float(total_bse_loss.item())
 
         self.reset_buffers()
         return {
