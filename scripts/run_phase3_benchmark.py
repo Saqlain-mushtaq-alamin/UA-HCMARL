@@ -38,8 +38,9 @@ def run_phase3_benchmark(
     net_file: str = "networks/grid4x4/grid4x4.net.xml",
     route_file: str = "networks/grid4x4/demand_uniform.rou.xml",
     num_intersections: int = 16,
-    num_seeds: int = 5,
-    max_steps: int = 100,
+    num_seeds: int = 10,
+    train_episodes: int = 100,
+    max_steps: int = 3600,
     output_dir: str = "experiments/phase3_belief_encoder",
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -62,8 +63,8 @@ def run_phase3_benchmark(
         seed=42,
     )
     print("  -> Collecting (o_noisy, s_true) training pairs across noise levels...")
-    X_train, Y_train = collect_bse_dataset(env_data, num_steps=500, noise_scenarios=noise_scenarios)
-    X_test, Y_test = collect_bse_dataset(env_data, num_steps=200, noise_scenarios=noise_scenarios)
+    X_train, Y_train = collect_bse_dataset(env_data, num_steps=2000, noise_scenarios=noise_scenarios)
+    X_test, Y_test = collect_bse_dataset(env_data, num_steps=500, noise_scenarios=noise_scenarios)
 
     # Instantiate Stage 3 controller & pre-train its BSE
     bse_mappo_lce = BSEMAPPOLCEController(agent_ids=agent_ids, use_confidence_modulation=True, freeze_bse=False)
@@ -71,8 +72,8 @@ def run_phase3_benchmark(
     vanilla_mappo_lce = MAPPOLCEController(agent_ids=agent_ids)
 
     print("  -> Optimizing BSE via L_BSE loss...")
-    loss_history = train_bse_supervised(bse_mappo_lce.bse, X_train, Y_train, epochs=5, batch_size=64)
-    train_bse_supervised(bse_mappo_ablation.bse, X_train, Y_train, epochs=5, batch_size=64)
+    loss_history = train_bse_supervised(bse_mappo_lce.bse, X_train, Y_train, epochs=20, batch_size=64)
+    train_bse_supervised(bse_mappo_ablation.bse, X_train, Y_train, epochs=20, batch_size=64)
 
     calib_metrics = evaluate_bse_calibration(bse_mappo_lce.bse, X_test, Y_test)
     print(f"  * Raw MSE: {calib_metrics['raw_mse']:.4f} | BSE MSE: {calib_metrics['bse_mse']:.4f} ({calib_metrics['mse_reduction_pct']:.1f}% reduction)")
@@ -92,15 +93,15 @@ def run_phase3_benchmark(
     trainer = Trainer(env=env_train)
 
     print("  -> Fine-tuning BSE+MAPPO-LCE (Proposed)...")
-    for ep in range(5):
+    for ep in range(train_episodes):
         trainer.train_episode(bse_mappo_lce, max_steps=max_steps, seed=42 + ep)
 
     print("  -> Fine-tuning BSE+MAPPO-LCE (Ablation: No Sigma-Modulation)...")
-    for ep in range(5):
+    for ep in range(train_episodes):
         trainer.train_episode(bse_mappo_ablation, max_steps=max_steps, seed=42 + ep)
 
     print("  -> Fine-tuning Vanilla MAPPO-LCE (Baseline)...")
-    for ep in range(5):
+    for ep in range(train_episodes):
         trainer.train_episode(vanilla_mappo_lce, max_steps=max_steps, seed=42 + ep)
 
     # -----------------------------------------------------------------
@@ -127,12 +128,14 @@ def run_phase3_benchmark(
                 num_intersections=num_intersections,
                 noise_scenario=noise,
                 max_steps=max_steps,
-                seed=seed,
+                seed=seed + 1000,  # Offset from training seeds
             )
             trainer_eval = Trainer(env=env_eval)
 
             for m_name, ctrl in methods.items():
-                summary = trainer_eval.run_evaluation_episode(ctrl, max_steps=max_steps, seed=seed)
+                summary = trainer_eval.run_evaluation_episode(
+                    ctrl, max_steps=max_steps, seed=seed + 1000
+                )
                 results[noise][m_name]["avg_delay"].append(summary["avg_delay"])
                 results[noise][m_name]["violation_rate"].append(summary["constraint_violation_rate"])
 
