@@ -137,7 +137,10 @@ class FMA2CController:
 
     def reset_buffers(self):
         self.worker_buffer = {
-            aid: {"obs_goal": [], "actions": [], "rewards": [], "dones": [], "values": []}
+            aid: {
+                "obs_goal": [], "actions": [], "log_probs": [],
+                "rewards": [], "dones": [], "values": []
+            }
             for aid in self.agent_ids
         }
         self.manager_buffer = {
@@ -145,6 +148,7 @@ class FMA2CController:
             for r in range(self.num_regions)
         }
         self.accumulated_manager_rewards = {r: 0.0 for r in range(self.num_regions)}
+        self._episode_done = False
 
     def _get_region_obs(self, r_idx: int, obs_dict: Dict[str, np.ndarray]) -> np.ndarray:
         a_list = self.region_to_agents[r_idx]
@@ -193,8 +197,10 @@ class FMA2CController:
 
                 if evaluate:
                     act_t = torch.argmax(dist.logits, dim=-1)
+                    log_prob_val = 0.0
                 else:
                     act_t = dist.sample()
+                    log_prob_val = float(dist.log_prob(act_t).item())
 
                 act = int(act_t.item())
                 actions[aid] = act
@@ -202,15 +208,19 @@ class FMA2CController:
                 if not evaluate:
                     self.worker_buffer[aid]["obs_goal"].append(input_vec)
                     self.worker_buffer[aid]["actions"].append(act)
+                    self.worker_buffer[aid]["log_probs"].append(log_prob_val)
                     self.worker_buffer[aid]["values"].append(float(val_t.item()))
 
         return actions
 
     def store_transition(self, rewards: Dict[str, float], dones: Dict[str, bool]):
+        is_done = any(dones.values())
+        self._episode_done = is_done
+
         for aid in self.agent_ids:
             if aid in rewards:
                 self.worker_buffer[aid]["rewards"].append(rewards[aid])
-                self.worker_buffer[aid]["dones"].append(dones[aid])
+                self.worker_buffer[aid]["dones"].append(dones.get(aid, False))
 
         # Manager rewards: aggregate over interval
         for r_idx in range(self.num_regions):
@@ -258,13 +268,17 @@ class FMA2CController:
             ret_t = torch.tensor(returns, dtype=torch.float32, device=self.device)
             val_t = torch.tensor(values, dtype=torch.float32, device=self.device)
             adv_t = ret_t - val_t
+            # Normalize advantages
+            if adv_t.numel() > 1:
+                adv_t = (adv_t - adv_t.mean()) / (adv_t.std() + 1e-8)
 
             dist, v_pred = self.worker(obs_goal)
             log_prob = dist.log_prob(actions)
+            entropy = dist.entropy().mean()
             policy_loss = -(log_prob * adv_t.detach()).mean()
             value_loss = nn.functional.mse_loss(v_pred, ret_t)
 
-            loss = policy_loss + 0.5 * value_loss
+            loss = policy_loss + 0.5 * value_loss - 0.01 * entropy  # entropy bonus
             self.worker_opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(self.worker.parameters(), max_norm=0.5)
