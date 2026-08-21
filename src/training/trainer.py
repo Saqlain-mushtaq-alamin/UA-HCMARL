@@ -1,10 +1,14 @@
 """
-Multi-Timescale Training Loop Skeleton (Phase 1 §1.3)
+Multi-Timescale Training Loop & Evaluation Orchestrator (Phase 1 / Phase 2 §2.1-2.4)
 
-Handles training loop orchestration across Layer 1 (BSE), Layer 2 (Worker), Layer 3 (Manager).
+Handles training loop orchestration across baselines:
+- Stage 0: Non-RL baselines (FixedTime, Actuated)
+- Stage 1: Flat Unconstrained MARL (IPPO, MAPPO)
+- Stage 2: Flat Constrained MARL (MAPPO-LCE)
+- Stage 2b: Hierarchical MARL (FMA2C)
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import numpy as np
 
 from src.envs.sumo_env import SUMOEnv
@@ -15,7 +19,7 @@ from src.training.curriculum import CurriculumScheduler
 
 class Trainer:
     """
-    Multi-timescale training orchestrator.
+    Multi-timescale training & evaluation orchestrator.
     """
 
     def __init__(
@@ -45,9 +49,12 @@ class Trainer:
                 if hasattr(controller, "reset") and step == 0:
                     controller.reset(list(obs_dict.keys()))
                 try:
-                    actions = controller.select_actions(obs_dict, step_count=step)
+                    actions = controller.select_actions(obs_dict, evaluate=True, step_count=step)
                 except TypeError:
-                    actions = controller.select_actions(obs_dict)
+                    try:
+                        actions = controller.select_actions(obs_dict, step_count=step)
+                    except TypeError:
+                        actions = controller.select_actions(obs_dict)
             else:
                 actions = {aid: self.env.action_space.sample() for aid in obs_dict.keys()}
 
@@ -65,3 +72,52 @@ class Trainer:
                 break
 
         return self.metrics_calc.compute_summary()
+
+    def train_episode(
+        self, controller, max_steps: int = 1000, seed: Optional[int] = None
+    ) -> Tuple[Dict[str, float], Dict[str, float]]:
+        """
+        Runs a training episode for an RL controller, storing transitions and running updates.
+        """
+        self.metrics_calc.reset()
+        obs_dict, _ = self.env.reset(seed=seed)
+
+        if hasattr(controller, "reset"):
+            controller.reset(list(obs_dict.keys()))
+
+        for step in range(max_steps):
+            try:
+                actions = controller.select_actions(obs_dict, evaluate=False, step_count=step)
+            except TypeError:
+                actions = controller.select_actions(obs_dict)
+
+            obs_dict, rewards, dones, truncateds, info = self.env.step(actions)
+
+            # Store transition in controller buffer if supported
+            if hasattr(controller, "store_transition"):
+                try:
+                    controller.store_transition(
+                        rewards=rewards,
+                        dones=dones,
+                        step_violations=info.get("step_violations"),
+                    )
+                except TypeError:
+                    controller.store_transition(rewards=rewards, dones=dones)
+
+            self.metrics_calc.record_step(
+                intersection_delays=info["step_delays"],
+                intersection_queues=info["step_queues"],
+                step_throughput=info["step_throughput"],
+                step_violations=info["step_violations"],
+                step_violation_magnitude=info["step_violation_magnitude"],
+            )
+
+            if all(dones.values()):
+                break
+
+        loss_info = {}
+        if hasattr(controller, "update"):
+            loss_info = controller.update()
+
+        summary = self.metrics_calc.compute_summary()
+        return summary, loss_info
