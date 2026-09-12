@@ -53,7 +53,7 @@ from src.evaluation.statistical import generate_statistical_report, wilcoxon_tes
 from src.evaluation.visualize import setup_plot_style, plot_robustness_degradation, plot_constraint_violations
 
 
-def generate_latex_table(results_clean: Dict[str, Dict[str, List[float]]]) -> str:
+def generate_latex_table(results_clean: Dict[str, Dict[str, List[float]]], add_footnote: bool = True) -> str:
     """Generates LaTeX code for Table 1: Main Clean Condition Performance."""
     latex = [
         "\\begin{table}[h]",
@@ -82,9 +82,17 @@ def generate_latex_table(results_clean: Dict[str, Dict[str, List[float]]]) -> st
         "\\hline",
         "\\end{tabular}",
         "\\label{tab:main_results}",
-        "\\end{table}",
     ])
 
+    if add_footnote:
+        latex.append(
+            "\\footnotetext{Under clean (zero-noise) conditions, confidence-modulation "
+            "(A0 vs A3) and BSE-dependent ablations (A0 vs A2) have limited discriminative "
+            "power by construction; the noise-uncertainty mechanisms they isolate are near-inert "
+            "without sensor noise. Primary novelty validation uses moderate/severe/extreme noise results.}"
+        )
+
+    latex.append("\\end{table}")
     return "\n".join(latex)
 
 
@@ -119,8 +127,11 @@ def run_phase5_ablation_benchmark(
     a2_no_bse = UAHCMARLController(agent_ids=agent_ids, obs_dim=16, action_dim=4, t_manager=15, freeze_bse=True)
     # A3: No-Coupling (BSE + Standard LCE + Uniform Manager) -- CRITICAL ABLATION
     a3_no_coupling = BSEMAPPOLCEController(agent_ids=agent_ids, use_confidence_modulation=False)
-    # A4: No-Constraints (BSE + Unconstrained Workers) — Bug 2.3 fix: TRAINED alongside others
-    a4_no_const = MAPPOController(agent_ids=agent_ids)
+    # A4: No-Constraints (Full UA-HCMARL hierarchy, Lagrangian disabled)
+    # FIX: Previously MAPPOController — identical to A6. Now correctly ablates the
+    # constraint layer *within* the UA-HCMARL hierarchy so the comparison isolates
+    # only the Lagrangian component (BSE + manager hierarchy kept intact).
+    a4_no_const = UAHCMARLController(agent_ids=agent_ids, obs_dim=16, action_dim=4, t_manager=15, disable_constraints=True)
     # A5: Flat-Constrained (MAPPO-LCE)
     a5_mappo_lce = MAPPOLCEController(agent_ids=agent_ids)
     # A6: Flat-Unconstrained (MAPPO) — Bug 2.3 fix: TRAINED alongside others
@@ -130,6 +141,8 @@ def run_phase5_ablation_benchmark(
     X_tr, Y_tr = collect_bse_dataset(env_train, num_steps=300, noise_scenarios=noise_scenarios)
     train_bse_supervised(a0_full.bse, X_tr, Y_tr, epochs=3)
     train_bse_supervised(a1_no_hier.bse, X_tr, Y_tr, epochs=3)
+    # A4 also has a BSE (it's UAHCMARLController with constraints disabled)
+    train_bse_supervised(a4_no_const.bse, X_tr, Y_tr, epochs=3)
 
     # Bug 2.3 fix: ALL controllers (including A4 and A6) are now trained before evaluation.
     # Previously A4 (MAPPOController, no constraints) and A6 (MAPPOController, floor)
@@ -150,7 +163,7 @@ def run_phase5_ablation_benchmark(
         "A1: No-Hierarchy": a1_no_hier,
         "A2: No-Belief-State": a2_no_bse,
         "A3: No-Coupling (Critical)": a3_no_coupling,
-        "A4: No-Constraints": a4_no_const,
+        "A4: No-Constraints (HCMARL)": a4_no_const,
         "A5: MAPPO-LCE (SOTA)": a5_mappo_lce,
         "A6: MAPPO (Floor)": a6_mappo,
     }
@@ -184,7 +197,15 @@ def run_phase5_ablation_benchmark(
         for a_name in ablations.keys():
             m_delay = float(np.mean(results[noise][a_name]["avg_delay"]))
             m_viol = float(np.mean(results[noise][a_name]["violation_rate"]))
-            print(f"    {a_name:28s} | Delay: {m_delay:6.2f} s | Violation Rate: {m_viol*100.0:5.1f}%")
+            print(f"    {a_name:30s} | Delay: {m_delay:6.2f} s | Violation Rate: {m_viol*100.0:5.1f}%")
+
+        if noise == "clean":
+            print(
+                "\n  [WARNING] Clean-condition results: confidence-modulation (A0 vs A3) and "
+                "BSE-dependent ablations (A0 vs A2) have limited discriminative power by construction.\n"
+                "  The noise-uncertainty mechanisms they isolate are near-inert without sensor noise.\n"
+                "  Use moderate/severe/extreme results as the primary novelty evidence."
+            )
 
     # -----------------------------------------------------------------
     # Step 3: Statistical Significance & Bonferroni Correction
