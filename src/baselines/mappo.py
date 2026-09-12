@@ -6,6 +6,12 @@ Features:
 - Parameter-shared or individual Actor networks operating on local observations.
 - Centralized Critic network operating on concatenated global state vector.
 - Centralized GAE advantage estimation.
+
+FIX (2026-08-26) — Bug 2.1:
+  When share_actor=True the shared network was updated once per agent per epoch
+  (16 agents × 4 epochs = 64 gradient steps) using progressively staler old_log_probs.
+  Fix: when shared, all agent observations are concatenated into one batch and the
+  network receives a single set of epoch updates with consistent old_log_probs.
 """
 
 from typing import Dict, List, Tuple, Any, Optional
@@ -218,29 +224,43 @@ class MAPPOController:
         total_ent_loss = 0.0
         update_count = 0
 
-        for aid in self.agent_ids:
-            obs = torch.tensor(
-                np.array(self.buffer["obs"][aid]), dtype=torch.float32, device=self.device
+        if self.share_actor:
+            # ── Bug 2.1 fix: aggregate ALL agents into ONE batch ─────────────────
+            # Concatenate observations, actions, and log-probs across agents.
+            # The advantage tensor (step-level) is repeated once per agent entry
+            # so that indices line up correctly.
+            all_obs = torch.cat(
+                [torch.tensor(np.array(self.buffer["obs"][aid]),
+                              dtype=torch.float32, device=self.device)
+                 for aid in self.agent_ids],
+                dim=0,
             )
-            actions = torch.tensor(
-                np.array(self.buffer["actions"][aid]), dtype=torch.long, device=self.device
+            all_actions = torch.cat(
+                [torch.tensor(np.array(self.buffer["actions"][aid]),
+                              dtype=torch.long, device=self.device)
+                 for aid in self.agent_ids],
+                dim=0,
             )
-            old_log_probs = torch.tensor(
-                np.array(self.buffer["log_probs"][aid]), dtype=torch.float32, device=self.device
+            all_old_lp = torch.cat(
+                [torch.tensor(np.array(self.buffer["log_probs"][aid]),
+                              dtype=torch.float32, device=self.device)
+                 for aid in self.agent_ids],
+                dim=0,
             )
+            # Repeat the step-level advantages once per agent
+            all_adv = adv_t.repeat(self.num_agents)
 
-            actor = self.shared_actor if self.share_actor else self.actors[aid]
-            opt = self.actor_optimizer if self.share_actor else self.actor_optimizers[aid]
+            actor = self.shared_actor
+            opt = self.actor_optimizer
             actor.train()
-
             for _ in range(num_epochs):
-                dist = actor(obs)
-                new_lp = dist.log_prob(actions)
+                dist = actor(all_obs)
+                new_lp = dist.log_prob(all_actions)
                 entropy = dist.entropy().mean()
 
-                ratio = torch.exp(new_lp - old_log_probs)
-                surr1 = ratio * adv_t
-                surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * adv_t
+                ratio = torch.exp(new_lp - all_old_lp)
+                surr1 = ratio * all_adv
+                surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * all_adv
                 policy_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy
 
                 opt.zero_grad()
@@ -251,6 +271,41 @@ class MAPPOController:
                 total_p_loss += policy_loss.item()
                 total_ent_loss += entropy.item()
                 update_count += 1
+        else:
+            # Individual actors: one batch per agent, same num_epochs each
+            for aid in self.agent_ids:
+                obs = torch.tensor(
+                    np.array(self.buffer["obs"][aid]), dtype=torch.float32, device=self.device
+                )
+                actions = torch.tensor(
+                    np.array(self.buffer["actions"][aid]), dtype=torch.long, device=self.device
+                )
+                old_log_probs = torch.tensor(
+                    np.array(self.buffer["log_probs"][aid]), dtype=torch.float32, device=self.device
+                )
+
+                actor = self.actors[aid]
+                opt = self.actor_optimizers[aid]
+                actor.train()
+
+                for _ in range(num_epochs):
+                    dist = actor(obs)
+                    new_lp = dist.log_prob(actions)
+                    entropy = dist.entropy().mean()
+
+                    ratio = torch.exp(new_lp - old_log_probs)
+                    surr1 = ratio * adv_t
+                    surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * adv_t
+                    policy_loss = -torch.min(surr1, surr2).mean() - self.entropy_coef * entropy
+
+                    opt.zero_grad()
+                    policy_loss.backward()
+                    nn.utils.clip_grad_norm_(actor.parameters(), max_norm=0.5)
+                    opt.step()
+
+                    total_p_loss += policy_loss.item()
+                    total_ent_loss += entropy.item()
+                    update_count += 1
 
         self.reset_buffers()
         return {
