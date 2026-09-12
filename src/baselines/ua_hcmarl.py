@@ -173,6 +173,68 @@ class UAHCMARLController:
         arr = np.array(padded, dtype=np.float32)
         return torch.tensor(arr, dtype=torch.float32, device=self.device).unsqueeze(0)
 
+    def _compute_bse_loss(self) -> torch.Tensor:
+        """
+        Online BSE self-consistency loss (MSE).
+
+        Re-runs the BSE forward pass *with gradients* on the stored observation
+        history windows for each agent, using the no-grad b_hat values collected
+        during select_actions as pseudo-targets.  This mirrors the supervised
+        pre-training signal (bse.compute_loss's MSE head) without requiring
+        env._get_clean_observation() at RL time.
+
+        Only called from update() when freeze_bse=False (A0).  A2 (freeze_bse=True)
+        has requires_grad_(False) on all BSE parameters, so this method is never
+        reached for it and its weights are guaranteed to stay at pretrained values.
+
+        Returns
+        -------
+        bse_loss : scalar Tensor, ready for .backward()
+        """
+        total_loss = torch.tensor(0.0, device=self.device)
+        n_samples = 0
+
+        self.bse.train()
+        for aid in self.agent_ids:
+            obs_seq = self.worker_buffer["obs"][aid]       # List[np.ndarray] length T
+            b_hat_targets = self.worker_buffer["b_hat"][aid]  # List[np.ndarray] length T
+            T = len(obs_seq)
+            if T == 0:
+                continue
+
+            # Reconstruct sliding history windows: for step t, window = obs[max(0,t-H+1):t+1]
+            # Pad with the first obs if the window is shorter than history_len.
+            history_tensors = []
+            for t in range(T):
+                start = max(0, t - self.history_len + 1)
+                window = obs_seq[start: t + 1]             # length in [1, history_len]
+                pad_len = self.history_len - len(window)
+                padded = [window[0]] * pad_len + list(window)
+                history_tensors.append(np.array(padded, dtype=np.float32))
+
+            # Stack to (T, history_len, obs_dim) and run BSE with gradients
+            hist_batch = torch.tensor(
+                np.array(history_tensors, dtype=np.float32),
+                dtype=torch.float32,
+                device=self.device,
+            )  # (T, history_len, obs_dim)
+
+            b_hat_recomputed, _, _ = self.bse(hist_batch)  # (T, belief_dim)
+
+            # Detached pseudo-targets: the no-grad outputs from select_actions
+            b_hat_target_t = torch.tensor(
+                np.array(b_hat_targets, dtype=np.float32),
+                dtype=torch.float32,
+                device=self.device,
+            ).detach()  # (T, belief_dim)
+
+            total_loss = total_loss + nn.functional.mse_loss(b_hat_recomputed, b_hat_target_t)
+            n_samples += 1
+
+        if n_samples > 0:
+            total_loss = total_loss / n_samples
+        return total_loss
+
     def select_actions(
         self, obs_dict: Dict[str, np.ndarray], evaluate: bool = False, step_count: int = 0
     ) -> Dict[str, int]:
@@ -424,10 +486,22 @@ class UAHCMARLController:
             self.manager_optimizers[r].step()
             total_mgr_loss += float(mgr_loss.item())
 
+        # 3. Online BSE update (A0 only — skipped when freeze_bse=True / A2 ablation)
+        bse_loss_val = 0.0
+        if not self.freeze_bse:
+            bse_loss = self._compute_bse_loss()
+            if bse_loss.requires_grad:  # guard: no-op if buffer was empty
+                self.bse_optimizer.zero_grad()
+                bse_loss.backward()
+                nn.utils.clip_grad_norm_(self.bse.parameters(), max_norm=0.5)
+                self.bse_optimizer.step()
+                bse_loss_val = float(bse_loss.item())
+
         self.reset_buffers()
         return {
             "worker_policy_loss": total_p_loss / self.num_agents,
             "worker_value_loss": float(loss_r_critic.item()),
             "manager_loss": total_mgr_loss / self.num_regions,
             "mean_allocated_budget": float(np.mean(list(self.worker_budgets.values()))),
+            "bse_loss": bse_loss_val,
         }
