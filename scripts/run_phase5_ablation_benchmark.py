@@ -18,6 +18,14 @@ Generates:
 - Figure 4: Sigma calibration scatter plot
 - Figure 5: Heterogeneous sensor failure showcase
 - Statistical significance matrix (Wilcoxon signed-rank + Bonferroni correction)
+
+FIX (2026-08-26) — Bug 2.3 / Bug 1.1 / Bug 1.2:
+  - Bug 2.3: A4 (No-Constraints) and A6 (MAPPO floor) are now TRAINED during the
+    ablation curriculum alongside the other controllers.  Previously both were freshly
+    initialized and evaluated without any training, causing ~100 s delays that were
+    labelled as "hierarchy collapse" when they were actually "random policy".
+  - Bug 1.1: Eval seeds now encode noise_index × 10 000 (same fix as Phase 2).
+  - Bug 1.2: num_seeds default raised to 10; max_steps raised to 3600.
 """
 
 import json
@@ -84,8 +92,8 @@ def run_phase5_ablation_benchmark(
     net_file: str = "networks/grid4x4/grid4x4.net.xml",
     route_file: str = "networks/grid4x4/demand_uniform.rou.xml",
     num_intersections: int = 16,
-    num_seeds: int = 5,
-    max_steps: int = 100,
+    num_seeds: int = 10,        # Bug 1.2: raised from 5
+    max_steps: int = 3600,      # Bug 1.2: raised from 100 (100 steps = 100 s, far too short)
     output_dir: str = "experiments/phase5_ablations",
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -111,11 +119,11 @@ def run_phase5_ablation_benchmark(
     a2_no_bse = UAHCMARLController(agent_ids=agent_ids, obs_dim=16, action_dim=4, t_manager=15, freeze_bse=True)
     # A3: No-Coupling (BSE + Standard LCE + Uniform Manager) -- CRITICAL ABLATION
     a3_no_coupling = BSEMAPPOLCEController(agent_ids=agent_ids, use_confidence_modulation=False)
-    # A4: No-Constraints (BSE + Unconstrained Workers)
+    # A4: No-Constraints (BSE + Unconstrained Workers) — Bug 2.3 fix: TRAINED alongside others
     a4_no_const = MAPPOController(agent_ids=agent_ids)
     # A5: Flat-Constrained (MAPPO-LCE)
     a5_mappo_lce = MAPPOLCEController(agent_ids=agent_ids)
-    # A6: Flat-Unconstrained (MAPPO)
+    # A6: Flat-Unconstrained (MAPPO) — Bug 2.3 fix: TRAINED alongside others
     a6_mappo = MAPPOController(agent_ids=agent_ids)
 
     # Pretrain BSE
@@ -123,9 +131,14 @@ def run_phase5_ablation_benchmark(
     train_bse_supervised(a0_full.bse, X_tr, Y_tr, epochs=3)
     train_bse_supervised(a1_no_hier.bse, X_tr, Y_tr, epochs=3)
 
-    print("  -> Training Ablation Matrix across 5 Curriculum Episodes...")
-    for ctrl in [a0_full, a1_no_hier, a2_no_bse, a3_no_coupling, a5_mappo_lce]:
-        for ep in range(3):
+    # Bug 2.3 fix: ALL controllers (including A4 and A6) are now trained before evaluation.
+    # Previously A4 (MAPPOController, no constraints) and A6 (MAPPOController, floor)
+    # were freshly initialized and never trained, causing ~100 s delays falsely
+    # attributed to "hierarchy collapse" when the real cause was random policy.
+    train_curriculum_episodes = 5
+    print(f"  -> Training ALL Ablation Controllers across {train_curriculum_episodes} Curriculum Episodes...")
+    for ctrl in [a0_full, a1_no_hier, a2_no_bse, a3_no_coupling, a4_no_const, a5_mappo_lce, a6_mappo]:
+        for ep in range(train_curriculum_episodes):
             trainer.train_episode(ctrl, max_steps=max_steps, seed=42 + ep)
 
     # -----------------------------------------------------------------
@@ -148,20 +161,23 @@ def run_phase5_ablation_benchmark(
     }
 
     for noise in noise_scenarios:
-        print(f"\n  Testing Scenario: [{noise.upper()}]")
+        noise_index = noise_scenarios.index(noise)  # Bug 1.1: encode noise in seed
+        print(f"\n  Testing Scenario: [{noise.upper()}] (noise_index={noise_index})")
         for seed in range(num_seeds):
+            env_seed = seed + noise_index * 10000   # Bug 1.1 fix
             env_eval = SUMOEnv(
                 net_file=net_file,
                 route_file=route_file,
                 num_intersections=num_intersections,
                 noise_scenario=noise,
                 max_steps=max_steps,
-                seed=seed,
+                seed=env_seed,
             )
             trainer_eval = Trainer(env=env_eval)
 
             for a_name, ctrl in ablations.items():
-                summary = trainer_eval.run_evaluation_episode(ctrl, max_steps=max_steps, seed=seed)
+                ep_seed = seed + noise_index * 10000  # Bug 1.1 fix
+                summary = trainer_eval.run_evaluation_episode(ctrl, max_steps=max_steps, seed=ep_seed)
                 results[noise][a_name]["avg_delay"].append(summary["avg_delay"])
                 results[noise][a_name]["violation_rate"].append(summary["constraint_violation_rate"])
 
