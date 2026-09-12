@@ -5,7 +5,23 @@ Features:
 - Dataset Collection: Gathers (o_noisy, s_true) sequence pairs across noise levels.
 - Supervised Pre-Training: Optimizes GRU-KalmanNet via L_BSE loss.
 - Calibration Evaluation: Evaluates MSE reduction (BSE vs Raw) and uncertainty correlation r(sigma_hat, error).
+
+FIX (2026-08-26) -- Bug 3.2:
+  The RL policy (BSEMAPPOLCEController) was being EVALUATED on BSE-smoothed inputs
+  (b_hat) but TRAINED using raw noisy observations from the environment during Phase 2
+  replay. This distribution shift caused BSE to INCREASE delay at every noise level
+  instead of reducing it.
+
+  Fix strategy:
+  1. During Phase 3 RL training, the controller already uses b_hat from the BSE as
+     worker_input (see bse_mappo_lce.py select_actions). BSE must be pre-trained
+     BEFORE RL training starts so that the BSE outputs are meaningful.
+  2. The new collect_bse_dataset_with_beliefs() helper generates (history, b_hat)
+     pairs from a trained BSE to allow warm-starting RL replay with BSE outputs.
+  3. Run evaluate_bse_calibration() after training and confirm bse_mse < raw_mse
+     under severe/extreme noise to verify BSE benefit.
 """
+
 
 from typing import Dict, List, Tuple, Any
 import numpy as np
@@ -148,3 +164,70 @@ def evaluate_bse_calibration(
         "sigma_calibration_correlation": corr,
         "mean_sigma": float(np.mean(sigmas)),
     }
+
+
+def collect_bse_dataset_with_beliefs(
+    env: SUMOEnv,
+    bse: GRUKalmanNet,
+    num_steps: int = 500,
+    history_len: int = 5,
+    noise_scenarios: List[str] = None,
+    device: str = "cpu",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Bug 3.2 fix helper: Collects (noisy_obs_history, b_hat, sigma_hat) tuples from a
+    trained BSE.  Use this to verify that the RL policy is being fed b_hat during
+    training, and to confirm that b_hat tracks ground truth better than raw_obs.
+
+    Returns
+    -------
+    X_hist   : (N, history_len, obs_dim)  noisy history windows
+    B_hat    : (N, obs_dim)               BSE beliefs
+    S_hat    : (N,)                       uncertainty scores
+    """
+    if noise_scenarios is None:
+        noise_scenarios = ["clean", "mild", "moderate", "severe", "extreme"]
+
+    device_obj = torch.device(device)
+    bse.to(device_obj)
+    bse.eval()
+
+    X_hist, B_hat, S_hat = [], [], []
+
+    for noise in noise_scenarios:
+        env.noise_injector.set_scenario(noise)
+        obs_dict, _ = env.reset(seed=123)
+        agent_ids = list(obs_dict.keys())
+        agent_histories: Dict[str, List[np.ndarray]] = {
+            aid: [obs_dict[aid]] * history_len for aid in agent_ids
+        }
+
+        for step in range(num_steps // len(noise_scenarios)):
+            actions = {aid: env.action_space.sample() for aid in agent_ids}
+            obs_dict, _, dones, _, _ = env.step(actions)
+
+            for aid in agent_ids:
+                noisy_obs = obs_dict[aid]
+                agent_histories[aid].append(noisy_obs)
+                if len(agent_histories[aid]) > history_len:
+                    agent_histories[aid].pop(0)
+
+                hist_arr = np.array(agent_histories[aid], dtype=np.float32)
+                hist_t = torch.tensor(hist_arr, dtype=torch.float32, device=device_obj).unsqueeze(0)
+
+                with torch.no_grad():
+                    b_hat_t, sigma_t, _ = bse(hist_t)
+
+                X_hist.append(hist_arr)
+                B_hat.append(b_hat_t.squeeze(0).cpu().numpy())
+                S_hat.append(float(sigma_t.item()))
+
+            if all(dones.values()):
+                obs_dict, _ = env.reset()
+                agent_histories = {aid: [obs_dict[aid]] * history_len for aid in agent_ids}
+
+    return (
+        np.array(X_hist, dtype=np.float32),
+        np.array(B_hat, dtype=np.float32),
+        np.array(S_hat, dtype=np.float32),
+    )
