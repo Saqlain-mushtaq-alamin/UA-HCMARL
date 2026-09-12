@@ -41,6 +41,7 @@ class UAHCMARLController:
         gae_lambda: float = 0.95,
         clip_ratio: float = 0.2,
         freeze_bse: bool = False,
+        disable_constraints: bool = False,
         device: str = "cpu",
     ):
         self.agent_ids = agent_ids
@@ -52,6 +53,7 @@ class UAHCMARLController:
         self.num_regions = num_regions
         self.b_total_per_region = b_total_per_region
         self.freeze_bse = freeze_bse
+        self.disable_constraints = disable_constraints
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
@@ -73,6 +75,13 @@ class UAHCMARLController:
 
         # Layer 1: GRU-KalmanNet BSE
         self.bse = GRUKalmanNet(raw_obs_dim=obs_dim, hidden_dim=64, belief_dim=obs_dim, history_len=history_len).to(self.device)
+
+        # A2 ablation: freeze BSE weights so they cannot adapt online.
+        # requires_grad_(False) is set here at construction so the optimizer
+        # receives no parameters to update and the forward pass runs in no_grad.
+        if self.freeze_bse:
+            for p in self.bse.parameters():
+                p.requires_grad_(False)
 
         # Layer 2: Workers
         self.worker_obs_dim = obs_dim + 1  # b_hat + sigma_hat
@@ -272,7 +281,10 @@ class UAHCMARLController:
             if len(self.manager_buffer[r]["states"]) > len(self.manager_buffer[r].get("rewards", [])):
                 self.manager_buffer[r].setdefault("rewards", []).append(r_reward)
 
-        if step_violations:
+        # A4 ablation: disable_constraints=True skips the entire Lagrangian penalty
+        # computation so net_rewards = env_rewards throughout training, isolating
+        # the contribution of the constraint layer within the hierarchy.
+        if step_violations and not self.disable_constraints:
             c_vec = np.array(
                 [
                     step_violations.get("green_time", 0),
