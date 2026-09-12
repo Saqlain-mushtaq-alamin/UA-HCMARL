@@ -17,6 +17,18 @@ FIX (2026-08-21):
      historical accumulator.
   3. SUMOEnv.reset() now passes the compound (seed, noise_scenario) information to
      the NoiseInjector so that each evaluation episode truly differs.
+
+FIX (2026-08-26) — Bug 1.3 / Bug 3.1:
+  4. Hard max-green enforcement: if time_in_phase >= max_green the simulator forces a
+     phase transition regardless of the requested action.  This eliminates the pathological
+     case where RL agents hold phase 0 forever, which caused >95% violation rates.
+  5. Min-green masking: if the agent requests a phase switch before min_green steps have
+     elapsed, the request is silently overridden to the current phase (the violation is
+     still counted so the Lagrangian penalty fires, but the simulator does not execute
+     an illegal transition).
+  6. 'delay' field renamed to 'avg_queue_length' throughout to reflect actual units
+     (vehicles in queue, NOT seconds of travel-time delay).  This prevents unit-confusion
+     in the results tables.
 """
 
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -85,31 +97,50 @@ class SingleIntersectionSimulator:
         """
         Executes one step in the simulator.
         Returns: (state, info, throughput, violations, violation_magnitude)
+
+        Constraint enforcement (Bug 1.3 fix):
+        - MAX GREEN (hard): when time_in_phase >= max_green the simulator forces an
+          automatic phase advance regardless of the requested action.  This prevents RL
+          agents from locking into a single phase indefinitely.
+        - MIN GREEN (soft mask): when the agent requests a phase change before min_green
+          steps, the violation is counted (so the Lagrangian fires) but the requested
+          transition is BLOCKED — the current phase is maintained.  This removes the
+          incentive to issue rapid illegal phase flips for reward hacking.
         """
         violations = {"green_time": 0, "green_skip": 0, "phase_skip": 0}
         violation_mag = 0.0
 
-        # Check action constraints
         requested_phase = action
 
-        if requested_phase != self.current_phase:
-            # Check Min Green violation
+        # ── Hard max-green enforcement ────────────────────────────────────────
+        # Evaluated FIRST, before the action comparison, so it fires even when
+        # the agent keeps requesting the same phase (the previous bug was placing
+        # this inside an if/elif and never reaching it for action==current_phase).
+        if self.time_in_phase >= self.max_green and self.current_phase % 2 == 0:
+            # Force advance to yellow regardless of requested action
+            violations["green_time"] += 1
+            violation_mag += (self.time_in_phase - self.max_green + 1)
+            forced_phase = (self.current_phase + 1) % 4
+            self.current_phase = forced_phase
+            self.time_in_phase = 0
+        elif requested_phase != self.current_phase:
+            # ── Min-green masking ─────────────────────────────────────────────
+            # Count the violation but block the illegal early switch.
             if self.time_in_phase < self.min_green:
                 violations["green_time"] += 1
                 violation_mag += (self.min_green - self.time_in_phase)
-
-            # Check Phase Skip (jumping without yellow phase)
-            if (self.current_phase % 2 == 0) and (requested_phase != self.current_phase + 1):
-                violations["phase_skip"] += 1
-
-            self.current_phase = requested_phase
-            self.time_in_phase = 0
+                # Block the switch — keep current phase, increment counter
+                requested_phase = self.current_phase
+                self.time_in_phase += 1
+            else:
+                # Legal phase switch: check for phase-skip (skipping yellow)
+                if (self.current_phase % 2 == 0) and (requested_phase != self.current_phase + 1):
+                    violations["phase_skip"] += 1
+                self.current_phase = requested_phase
+                self.time_in_phase = 0
         else:
+            # Same phase requested, within max_green limit
             self.time_in_phase += 1
-            # Check Max Green violation
-            if self.time_in_phase > self.max_green:
-                violations["green_time"] += 1
-                violation_mag += (self.time_in_phase - self.max_green)
 
         # Vehicle arrivals (Poisson process)
         arrivals = self.rng.poisson(self.arrival_rates)
@@ -130,10 +161,11 @@ class SingleIntersectionSimulator:
             self.queues[app] -= discharged
             step_throughput += int(discharged)
 
-        # Step delay = current queue length (vehicles waiting THIS step)
-        # This is bounded and gives a clear learning signal for RL.
-        step_delay = float(np.sum(self.queues))
+        # avg_queue_length = total vehicles queued across all 4 approaches THIS step.
+        # NOTE: units are VEHICLES, not seconds of travel-time delay.
+        # Previously mis-labelled as 'delay' — renamed to prevent unit confusion (Bug 3.1).
         step_queue = float(np.sum(self.queues))
+        avg_queue_length = step_queue
 
         # Construct raw observation
         # State vector: [queues(4) norm, arrival_rates(4) norm, phase_onehot(4), time_in_phase norm, total_queue norm, phase_pressure norm]
@@ -159,7 +191,10 @@ class SingleIntersectionSimulator:
 
         info = {
             "queue_length": step_queue,
-            "delay": step_delay,
+            # avg_queue_length replaces the old 'delay' field (Bug 3.1 rename).
+            # Both keys are provided for backward-compat with existing metric code.
+            "avg_queue_length": avg_queue_length,
+            "delay": avg_queue_length,  # kept for backward-compat; units = vehicles
             "current_phase": self.current_phase,
             "time_in_phase": self.time_in_phase,
         }
@@ -290,14 +325,14 @@ class SUMOEnv(gym.Env):
             )
             obs_dict[i_id] = noisy_obs
 
-            # Reward: negative step-wise queue (bounded, stable, immediately informative)
+            # Reward: negative step-wise queue length (bounded, stable signal).
             # Normalized by number of approaches so magnitude is independent of
-            # network size.
-            rewards[i_id] = -float(info["delay"]) / 4.0
+            # network size.  Uses avg_queue_length (vehicles) which replaced 'delay'.
+            rewards[i_id] = -float(info["avg_queue_length"]) / 4.0
             dones[i_id] = is_done
             truncateds[i_id] = False
 
-            step_delays[i_id] = info["delay"]
+            step_delays[i_id] = info["avg_queue_length"]   # avg_queue_length (vehicles)
             step_queues[i_id] = info["queue_length"]
             total_step_throughput += throughput
 
