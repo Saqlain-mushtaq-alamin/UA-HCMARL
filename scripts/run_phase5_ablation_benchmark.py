@@ -119,12 +119,16 @@ def run_phase5_ablation_benchmark(
     env_train = SUMOEnv(net_file=net_file, route_file=route_file, num_intersections=num_intersections, max_steps=max_steps, seed=42)
     trainer = Trainer(env=env_train)
 
-    # A0: UA-HCMARL (Full System)
+    # A0: UA-HCMARL (Full System — BSE online-adapted via next-step prediction)
     a0_full = UAHCMARLController(agent_ids=agent_ids, obs_dim=16, action_dim=4, t_manager=15)
     # A1: No-Hierarchy (BSE + sigma-mod LCE, Flat)
     a1_no_hier = BSEMAPPOLCEController(agent_ids=agent_ids, use_confidence_modulation=True)
-    # A2: No-Belief-State (Raw Obs + Standard LCE + Manager)
-    a2_no_bse = UAHCMARLController(agent_ids=agent_ids, obs_dim=16, action_dim=4, t_manager=15, freeze_bse=True)
+    # A2: No-Belief-State (Raw Obs directly to worker — BSE bypassed entirely)
+    # FIX (2026-09-23): Previously used freeze_bse=True (frozen *random* BSE), which was
+    # neither a proper pretrained BSE baseline nor a true raw-obs baseline.
+    # bypass_bse=True skips the BSE forward pass completely; the worker receives raw
+    # noisy observations directly, correctly isolating the BSE contribution.
+    a2_no_bse = UAHCMARLController(agent_ids=agent_ids, obs_dim=16, action_dim=4, t_manager=15, bypass_bse=True)
     # A3: No-Coupling (BSE + Standard LCE + Uniform Manager) -- CRITICAL ABLATION
     a3_no_coupling = BSEMAPPOLCEController(agent_ids=agent_ids, use_confidence_modulation=False)
     # A4: No-Constraints (Full UA-HCMARL hierarchy, Lagrangian disabled)
@@ -137,10 +141,12 @@ def run_phase5_ablation_benchmark(
     # A6: Flat-Unconstrained (MAPPO) — Bug 2.3 fix: TRAINED alongside others
     a6_mappo = MAPPOController(agent_ids=agent_ids)
 
-    # Pretrain BSE
+    # Pretrain BSE for controllers that use it (A0, A1, A3, A4).
+    # A2 (bypass_bse=True) skips the BSE entirely — no pretraining needed.
     X_tr, Y_tr = collect_bse_dataset(env_train, num_steps=300, noise_scenarios=noise_scenarios)
     train_bse_supervised(a0_full.bse, X_tr, Y_tr, epochs=3)
     train_bse_supervised(a1_no_hier.bse, X_tr, Y_tr, epochs=3)
+    train_bse_supervised(a3_no_coupling.bse, X_tr, Y_tr, epochs=3)
     # A4 also has a BSE (it's UAHCMARLController with constraints disabled)
     train_bse_supervised(a4_no_const.bse, X_tr, Y_tr, epochs=3)
 
