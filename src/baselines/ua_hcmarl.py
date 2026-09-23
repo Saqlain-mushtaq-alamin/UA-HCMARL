@@ -41,6 +41,7 @@ class UAHCMARLController:
         gae_lambda: float = 0.95,
         clip_ratio: float = 0.2,
         freeze_bse: bool = False,
+        bypass_bse: bool = False,
         disable_constraints: bool = False,
         device: str = "cpu",
     ):
@@ -53,6 +54,10 @@ class UAHCMARLController:
         self.num_regions = num_regions
         self.b_total_per_region = b_total_per_region
         self.freeze_bse = freeze_bse
+        # bypass_bse=True: skip the BSE entirely and feed raw obs to the worker.
+        # Used by A2 (No-Belief-State) to test whether the belief-state layer helps
+        # at all vs. using the raw noisy observation directly as worker input.
+        self.bypass_bse = bypass_bse
         self.disable_constraints = disable_constraints
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -73,18 +78,27 @@ class UAHCMARLController:
             for aid in aids:
                 self.agent_to_region[aid] = r
 
-        # Layer 1: GRU-KalmanNet BSE
-        self.bse = GRUKalmanNet(raw_obs_dim=obs_dim, hidden_dim=64, belief_dim=obs_dim, history_len=history_len).to(self.device)
+        # Layer 1: GRU-KalmanNet BSE (not built when bypass_bse=True)
+        if not self.bypass_bse:
+            self.bse = GRUKalmanNet(raw_obs_dim=obs_dim, hidden_dim=64, belief_dim=obs_dim, history_len=history_len).to(self.device)
 
-        # A2 ablation: freeze BSE weights so they cannot adapt online.
-        # requires_grad_(False) is set here at construction so the optimizer
-        # receives no parameters to update and the forward pass runs in no_grad.
-        if self.freeze_bse:
+            # freeze_bse: BSE weights are pretrained but cannot adapt online.
+            # Only relevant when bypass_bse=False (A0 with online adaptation vs A0 frozen).
+            if self.freeze_bse:
+                for p in self.bse.parameters():
+                    p.requires_grad_(False)
+        else:
+            # bypass_bse: build a stub BSE so downstream code that references
+            # self.bse (e.g. bse_trainer) doesn't raise AttributeError.
+            # The stub is never called during select_actions.
+            self.bse = GRUKalmanNet(raw_obs_dim=obs_dim, hidden_dim=64, belief_dim=obs_dim, history_len=history_len).to(self.device)
             for p in self.bse.parameters():
-                p.requires_grad_(False)
+                p.requires_grad_(False)  # never updated; never used in forward pass
 
         # Layer 2: Workers
-        self.worker_obs_dim = obs_dim + 1  # b_hat + sigma_hat
+        # When bypass_bse=True: worker receives raw obs (obs_dim dims, no sigma).
+        # When bypass_bse=False: worker receives (b_hat, sigma_hat) = obs_dim + 1 dims.
+        self.worker_obs_dim = obs_dim if self.bypass_bse else obs_dim + 1  # b_hat + sigma_hat
         global_state_dim = self.worker_obs_dim * self.num_agents
 
         self.worker_actor = MAPPOActor(self.worker_obs_dim, action_dim).to(self.device)
@@ -284,20 +298,30 @@ class UAHCMARLController:
                     self.manager_buffer[r]["sigma_bars"].append(sigma_bar)
 
         # 2. Worker Action Selection
-        self.bse.eval()
+        if not self.bypass_bse:
+            self.bse.eval()
         self.worker_actor.eval()
 
         with torch.no_grad():
             for aid in self.agent_ids:
                 raw_obs = obs_dict.get(aid, np.zeros(self.obs_dim, dtype=np.float32))
-                hist_t = self._get_history_tensor(aid, raw_obs)
-                prev_b = self.prev_beliefs.get(aid, None)
 
-                b_hat_t, sigma_hat_t, _ = self.bse(hist_t, prev_belief=prev_b)
-                self.prev_beliefs[aid] = b_hat_t.detach()
+                if self.bypass_bse:
+                    # A2 (No-Belief-State): skip BSE entirely, use raw noisy obs as worker input.
+                    # sigma_hat is unavailable — set to a neutral constant (1.0).
+                    worker_input = raw_obs.copy()
+                    sigma_hat_val = 1.0
+                    b_hat_np = raw_obs.copy()  # stored for consistency but not used by worker
+                else:
+                    hist_t = self._get_history_tensor(aid, raw_obs)
+                    prev_b = self.prev_beliefs.get(aid, None)
 
-                b_hat_np = b_hat_t.squeeze(0).cpu().numpy()
-                sigma_hat_val = float(sigma_hat_t.item())
+                    b_hat_t, sigma_hat_t, _ = self.bse(hist_t, prev_belief=prev_b)
+                    self.prev_beliefs[aid] = b_hat_t.detach()
+
+                    b_hat_np = b_hat_t.squeeze(0).cpu().numpy()
+                    sigma_hat_val = float(sigma_hat_t.item())
+                    worker_input = np.concatenate([b_hat_np, [sigma_hat_val]], axis=0)
 
                 # Store latest report for upward communication
                 self.latest_worker_reports[aid] = {
@@ -306,7 +330,6 @@ class UAHCMARLController:
                     "violation_rate": 0.0,
                 }
 
-                worker_input = np.concatenate([b_hat_np, [sigma_hat_val]], axis=0)
                 worker_input_dict[aid] = worker_input
                 worker_input_t = torch.tensor(worker_input, dtype=torch.float32, device=self.device).unsqueeze(0)
 
@@ -321,12 +344,15 @@ class UAHCMARLController:
 
                 if not evaluate:
                     log_prob = float(dist.log_prob(act_t).item())
-                    self.worker_buffer["obs"][aid].append(raw_obs)
-                    # Backfill next_obs for the previous step (step t stores obs[t+1])
-                    if len(self.worker_buffer["next_obs"][aid]) < len(self.worker_buffer["obs"][aid]) - 1:
-                        # If we're behind, fill the gap with the current obs
-                        self.worker_buffer["next_obs"][aid].append(raw_obs)
-                    self.worker_buffer["next_obs"][aid].append(raw_obs)  # will be overwritten on next step
+                    # Update next_obs of previous step with this observation (obs[t+1] for step t)
+                    buf_next = self.worker_buffer["next_obs"][aid]
+                    buf_obs  = self.worker_buffer["obs"][aid]
+                    if len(buf_obs) > 0:
+                        # Overwrite the last placeholder with the real next obs
+                        buf_next[-1] = raw_obs
+                    # Append current obs and a placeholder for its own next_obs
+                    buf_obs.append(raw_obs)
+                    buf_next.append(raw_obs)  # placeholder; will be overwritten next step (or stays for last step)
                     self.worker_buffer["b_hat"][aid].append(b_hat_np)
                     self.worker_buffer["sigma_hat"][aid].append(sigma_hat_val)
                     self.worker_buffer["worker_input"][aid].append(worker_input)
@@ -344,6 +370,7 @@ class UAHCMARLController:
                 self.worker_buffer["cost_values"].append(c_val)
 
         return actions
+
 
     def store_transition(
         self,
