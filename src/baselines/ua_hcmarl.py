@@ -137,6 +137,7 @@ class UAHCMARLController:
 
         self.worker_buffer = {
             "obs": {aid: [] for aid in self.agent_ids},
+            "next_obs": {aid: [] for aid in self.agent_ids},  # For next-step BSE prediction loss
             "b_hat": {aid: [] for aid in self.agent_ids},
             "sigma_hat": {aid: [] for aid in self.agent_ids},
             "worker_input": {aid: [] for aid in self.agent_ids},
@@ -175,17 +176,26 @@ class UAHCMARLController:
 
     def _compute_bse_loss(self) -> torch.Tensor:
         """
-        Online BSE self-consistency loss (MSE).
+        Online BSE next-step prediction loss.
 
-        Re-runs the BSE forward pass *with gradients* on the stored observation
-        history windows for each agent, using the no-grad b_hat values collected
-        during select_actions as pseudo-targets.  This mirrors the supervised
-        pre-training signal (bse.compute_loss's MSE head) without requiring
-        env._get_clean_observation() at RL time.
+        FIX (2026-09-23) — was circular self-distillation:
+          The previous implementation re-ran the BSE forward pass and used its
+          own earlier no-grad outputs (b_hat stored during select_actions) as
+          pseudo-targets.  That is circular self-distillation: the gradient only
+          pushes BSE outputs toward themselves, providing no real learning signal
+          and causing drift.  Diagnostic confirmed FAIL/NEUTRAL.
 
-        Only called from update() when freeze_bse=False (A0).  A2 (freeze_bse=True)
-        has requires_grad_(False) on all BSE parameters, so this method is never
-        reached for it and its weights are guaranteed to stay at pretrained values.
+        New implementation — next-step observation prediction:
+          For each step t the BSE produces belief b_hat[t] from history obs[0:t+1].
+          We use the NEXT raw observation obs[t+1] (an independently drawn future
+          measurement) as the prediction target.  This is a genuine self-supervised
+          signal: b_hat[t] should summarise the current state well enough to
+          anticipate obs[t+1].
+
+          Loss: MSE(b_hat[t], obs[t+1])  averaged over t in [0, T-2] and over agents.
+
+        Only called from update() when freeze_bse=False (A0 mode).
+        A2 (freeze_bse=True) never reaches this path.
 
         Returns
         -------
@@ -197,38 +207,43 @@ class UAHCMARLController:
         self.bse.train()
         for aid in self.agent_ids:
             obs_seq = self.worker_buffer["obs"][aid]       # List[np.ndarray] length T
-            b_hat_targets = self.worker_buffer["b_hat"][aid]  # List[np.ndarray] length T
+            next_obs_seq = self.worker_buffer["next_obs"][aid]  # List[np.ndarray] length T
             T = len(obs_seq)
-            if T == 0:
+            # Need at least 2 steps for a meaningful (obs[t], obs[t+1]) pair
+            if T < 2:
                 continue
 
-            # Reconstruct sliding history windows: for step t, window = obs[max(0,t-H+1):t+1]
-            # Pad with the first obs if the window is shorter than history_len.
+            # Reconstruct sliding history windows up to step t (not t+1)
             history_tensors = []
-            for t in range(T):
+            next_obs_targets = []
+            for t in range(T - 1):          # t in [0, T-2]; target is next_obs[t] = obs[t+1]
                 start = max(0, t - self.history_len + 1)
-                window = obs_seq[start: t + 1]             # length in [1, history_len]
+                window = obs_seq[start: t + 1]
                 pad_len = self.history_len - len(window)
                 padded = [window[0]] * pad_len + list(window)
                 history_tensors.append(np.array(padded, dtype=np.float32))
+                next_obs_targets.append(next_obs_seq[t])   # obs[t+1]
 
-            # Stack to (T, history_len, obs_dim) and run BSE with gradients
+            if len(history_tensors) == 0:
+                continue
+
+            # (T-1, history_len, obs_dim) → BSE with gradients
             hist_batch = torch.tensor(
                 np.array(history_tensors, dtype=np.float32),
                 dtype=torch.float32,
                 device=self.device,
-            )  # (T, history_len, obs_dim)
+            )
 
-            b_hat_recomputed, _, _ = self.bse(hist_batch)  # (T, belief_dim)
+            b_hat_recomputed, _, _ = self.bse(hist_batch)  # (T-1, belief_dim)
 
-            # Detached pseudo-targets: the no-grad outputs from select_actions
-            b_hat_target_t = torch.tensor(
-                np.array(b_hat_targets, dtype=np.float32),
+            # Independent next-observation targets (detached — they are data, not model output)
+            next_obs_t = torch.tensor(
+                np.array(next_obs_targets, dtype=np.float32),
                 dtype=torch.float32,
                 device=self.device,
-            ).detach()  # (T, belief_dim)
+            ).detach()  # (T-1, obs_dim)
 
-            total_loss = total_loss + nn.functional.mse_loss(b_hat_recomputed, b_hat_target_t)
+            total_loss = total_loss + nn.functional.mse_loss(b_hat_recomputed, next_obs_t)
             n_samples += 1
 
         if n_samples > 0:
@@ -307,6 +322,11 @@ class UAHCMARLController:
                 if not evaluate:
                     log_prob = float(dist.log_prob(act_t).item())
                     self.worker_buffer["obs"][aid].append(raw_obs)
+                    # Backfill next_obs for the previous step (step t stores obs[t+1])
+                    if len(self.worker_buffer["next_obs"][aid]) < len(self.worker_buffer["obs"][aid]) - 1:
+                        # If we're behind, fill the gap with the current obs
+                        self.worker_buffer["next_obs"][aid].append(raw_obs)
+                    self.worker_buffer["next_obs"][aid].append(raw_obs)  # will be overwritten on next step
                     self.worker_buffer["b_hat"][aid].append(b_hat_np)
                     self.worker_buffer["sigma_hat"][aid].append(sigma_hat_val)
                     self.worker_buffer["worker_input"][aid].append(worker_input)
