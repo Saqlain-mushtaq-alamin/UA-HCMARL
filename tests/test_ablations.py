@@ -20,12 +20,15 @@ def test_ablation_variants_instantiation():
 
     a0 = UAHCMARLController(agent_ids=agent_ids, obs_dim=16, action_dim=4)
     a1 = BSEMAPPOLCEController(agent_ids=agent_ids, use_confidence_modulation=True)
+    a2 = UAHCMARLController(agent_ids=agent_ids, obs_dim=16, action_dim=4, bypass_bse=True)
     a3 = BSEMAPPOLCEController(agent_ids=agent_ids, use_confidence_modulation=False)
+    a4 = UAHCMARLController(agent_ids=agent_ids, obs_dim=16, action_dim=4, disable_constraints=True)
+    a5 = MAPPOController(agent_ids=agent_ids)
     a6 = MAPPOController(agent_ids=agent_ids)
 
     obs_dict = {aid: np.random.randn(16).astype(np.float32) for aid in agent_ids}
 
-    for name, ctrl in [("A0", a0), ("A1", a1), ("A3", a3), ("A6", a6)]:
+    for name, ctrl in [("A0", a0), ("A1", a1), ("A2", a2), ("A3", a3), ("A4", a4), ("A5", a5), ("A6", a6)]:
         acts = ctrl.select_actions(obs_dict, evaluate=True)
         assert len(acts) == 2, f"Failed for variant {name}"
 
