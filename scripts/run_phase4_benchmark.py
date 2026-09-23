@@ -39,7 +39,7 @@ def run_phase4_benchmark(
     route_file: str = "networks/grid4x4/demand_uniform.rou.xml",
     num_intersections: int = 16,
     num_seeds: int = 5,
-    max_steps: int = 100,
+    max_steps: int = 3600,   # FIX: was 100 (only 100 s of simulation — far too short)
     output_dir: str = "experiments/phase4_full_hierarchy",
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -67,7 +67,6 @@ def run_phase4_benchmark(
     X_tr, Y_tr = collect_bse_dataset(env_train, num_steps=300, noise_scenarios=noise_scenarios)
     train_bse_supervised(ua_hcmarl.bse, X_tr, Y_tr, epochs=3)
     train_bse_supervised(bse_mappo_lce.bse, X_tr, Y_tr, epochs=3)
-
     print("  -> Training UA-HCMARL (D1: Manager Pretraining, D2: Joint Fine-Tuning)...")
     for ep in range(5):
         trainer.train_episode(ua_hcmarl, max_steps=max_steps, seed=42 + ep)
@@ -96,20 +95,23 @@ def run_phase4_benchmark(
     }
 
     for noise in noise_scenarios:
-        print(f"\n  Testing Noise Scenario: [{noise.upper()}]")
+        noise_index = noise_scenarios.index(noise)  # Bug 1.1: encode noise in seed
+        print(f"\n  Testing Noise Scenario: [{noise.upper()}] (noise_index={noise_index})")
         for seed in range(num_seeds):
+            env_seed = seed + noise_index * 10000   # Bug 1.1 fix: same as Phase 5
             env_eval = SUMOEnv(
                 net_file=net_file,
                 route_file=route_file,
                 num_intersections=num_intersections,
                 noise_scenario=noise,
                 max_steps=max_steps,
-                seed=seed,
+                seed=env_seed,
             )
             trainer_eval = Trainer(env=env_eval)
 
             for c_name, ctrl in all_controllers.items():
-                summary = trainer_eval.run_evaluation_episode(ctrl, max_steps=max_steps, seed=seed)
+                ep_seed = seed + noise_index * 10000
+                summary = trainer_eval.run_evaluation_episode(ctrl, max_steps=max_steps, seed=ep_seed)
                 results[noise][c_name]["avg_delay"].append(summary["avg_delay"])
                 results[noise][c_name]["violation_rate"].append(summary["constraint_violation_rate"])
 
