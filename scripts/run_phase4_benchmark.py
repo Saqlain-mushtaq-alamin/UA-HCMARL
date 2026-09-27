@@ -90,15 +90,17 @@ def run_phase4_benchmark(
         "UA-HCMARL (Proposed)": ua_hcmarl,
     }
 
-    results: Dict[str, Dict[str, Dict[str, List[float]]]] = {
-        noise: {c: {"avg_delay": [], "violation_rate": []} for c in all_controllers.keys()}
-        for noise in noise_scenarios
-    }
+    raw_results_path = os.path.join(output_dir, "phase4_raw_results.json")
+    checkpointer = ResultCheckpointer(raw_results_path, scenarios=noise_scenarios, methods=list(all_controllers.keys()))
 
     for noise in noise_scenarios:
         noise_index = noise_scenarios.index(noise)  # Bug 1.1: encode noise in seed
         print(f"\n  Testing Noise Scenario: [{noise.upper()}] (noise_index={noise_index})")
         for seed in range(num_seeds):
+            all_done = all(checkpointer.is_completed(noise, c_name, seed) for c_name in all_controllers.keys())
+            if all_done:
+                continue
+
             env_seed = seed + noise_index * 10000   # Bug 1.1 fix: same as Phase 5
             env_eval = SUMOEnv(
                 net_file=net_file,
@@ -111,15 +113,24 @@ def run_phase4_benchmark(
             trainer_eval = Trainer(env=env_eval)
 
             for c_name, ctrl in all_controllers.items():
+                if checkpointer.is_completed(noise, c_name, seed):
+                    continue
                 ep_seed = seed + noise_index * 10000
                 summary = trainer_eval.run_evaluation_episode(ctrl, max_steps=max_steps, seed=ep_seed)
-                results[noise][c_name]["avg_delay"].append(summary["avg_delay"])
-                results[noise][c_name]["violation_rate"].append(summary["constraint_violation_rate"])
+                checkpointer.record_result(
+                    scenario=noise,
+                    method=c_name,
+                    avg_delay=summary["avg_delay"],
+                    violation_rate=summary["constraint_violation_rate"],
+                )
 
+        results = checkpointer.get_results()
         for c_name in all_controllers.keys():
-            m_delay = float(np.mean(results[noise][c_name]["avg_delay"]))
-            m_viol = float(np.mean(results[noise][c_name]["violation_rate"]))
+            m_delay = float(np.mean(results[noise][c_name]["avg_delay"])) if results[noise][c_name]["avg_delay"] else float("nan")
+            m_viol = float(np.mean(results[noise][c_name]["violation_rate"])) if results[noise][c_name]["violation_rate"] else float("nan")
             print(f"    {c_name:24s} | Delay: {m_delay:6.2f} s | Violation Rate: {m_viol*100.0:5.1f}%")
+
+    results = checkpointer.get_results()
 
     # -----------------------------------------------------------------
     # Step 3: Experiment 4.3 (Heterogeneous Degradation Showcase)
