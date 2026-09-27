@@ -58,6 +58,7 @@ from src.evaluation.visualize import (
     plot_constraint_violations,
     plot_hierarchy_fragility_diagnostic,
 )
+from checkpointed_runner import ResultCheckpointer
 
 
 def _reset_lagrangian_state(controller):
