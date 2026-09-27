@@ -32,6 +32,7 @@ from src.training.bse_trainer import (
 )
 from src.evaluation.statistical import generate_statistical_report
 from src.evaluation.visualize import setup_plot_style, plot_robustness_degradation, plot_constraint_violations
+from checkpointed_runner import ResultCheckpointer
 
 
 def run_phase3_benchmark(
