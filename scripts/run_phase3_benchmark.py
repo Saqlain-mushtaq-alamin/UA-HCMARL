@@ -115,14 +115,16 @@ def run_phase3_benchmark(
         "BSE+MAPPO-LCE (Proposed)": bse_mappo_lce,
     }
 
-    results: Dict[str, Dict[str, Dict[str, List[float]]]] = {
-        noise: {m: {"avg_delay": [], "violation_rate": []} for m in methods.keys()}
-        for noise in noise_scenarios
-    }
+    raw_results_path = os.path.join(output_dir, "phase3_raw_results.json")
+    checkpointer = ResultCheckpointer(raw_results_path, scenarios=noise_scenarios, methods=list(methods.keys()))
 
     for noise in noise_scenarios:
         print(f"\n  Testing Noise Scenario: [{noise.upper()}]")
         for seed in range(num_seeds):
+            all_done = all(checkpointer.is_completed(noise, m_name, seed) for m_name in methods.keys())
+            if all_done:
+                continue
+
             env_eval = SUMOEnv(
                 net_file=net_file,
                 route_file=route_file,
@@ -134,16 +136,25 @@ def run_phase3_benchmark(
             trainer_eval = Trainer(env=env_eval)
 
             for m_name, ctrl in methods.items():
+                if checkpointer.is_completed(noise, m_name, seed):
+                    continue
                 summary = trainer_eval.run_evaluation_episode(
                     ctrl, max_steps=max_steps, seed=seed + 1000
                 )
-                results[noise][m_name]["avg_delay"].append(summary["avg_delay"])
-                results[noise][m_name]["violation_rate"].append(summary["constraint_violation_rate"])
+                checkpointer.record_result(
+                    scenario=noise,
+                    method=m_name,
+                    avg_delay=summary["avg_delay"],
+                    violation_rate=summary["constraint_violation_rate"],
+                )
 
+        results = checkpointer.get_results()
         for m_name in methods.keys():
-            m_delay = float(np.mean(results[noise][m_name]["avg_delay"]))
-            m_viol = float(np.mean(results[noise][m_name]["violation_rate"]))
+            m_delay = float(np.mean(results[noise][m_name]["avg_delay"])) if results[noise][m_name]["avg_delay"] else float("nan")
+            m_viol = float(np.mean(results[noise][m_name]["violation_rate"])) if results[noise][m_name]["violation_rate"] else float("nan")
             print(f"    {m_name:32s} | Delay: {m_delay:6.2f} s | Violation Rate: {m_viol*100.0:5.1f}%")
+
+    results = checkpointer.get_results()
 
     # -----------------------------------------------------------------
     # Step 4: Statistical Analysis & Figure Artifact Generation
