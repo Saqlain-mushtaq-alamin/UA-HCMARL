@@ -43,7 +43,7 @@ def _reset_lagrangian(ctrl):
             l.reset()
 
 
-def make_env(num_intersections, noise="clean", seed=42, max_steps=500):
+def make_env(num_intersections, noise="clean", seed=42, max_steps=3600):
     return SUMOEnv(
         num_intersections=num_intersections,
         noise_scenario=noise,
@@ -307,17 +307,20 @@ def run_phase5(cfg, ua_hcmarl, bse_proposed, phase2_controllers):
 # ─────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fast", action="store_true", help="Fast mode for quick validation")
+    parser.add_argument(
+        "--profile",
+        type=str,
+        default="canonical",
+        choices=["canonical", "fast", "smoke"],
+        help="Configuration profile (default: canonical)",
+    )
+    parser.add_argument("--fast", action="store_true", help="Deprecated: shorthand for --profile fast")
     args = parser.parse_args()
 
-    if args.fast:
-        cfg = dict(num_intersections=4, train_eps=80, max_steps=500,
-                   num_seeds=5, n_eval=2, bse_steps=500, bse_epochs=10)
-        print("Mode: FAST (4 intersections | 80 train eps | 500 steps | 5 seeds)")
-    else:
-        cfg = dict(num_intersections=8, train_eps=150, max_steps=800,
-                   num_seeds=10, n_eval=3, bse_steps=2000, bse_epochs=20)
-        print("Mode: FULL (8 intersections | 150 train eps | 800 steps | 10 seeds)")
+    from experiment_config import get_config
+    profile_to_use = "fast" if args.fast else args.profile
+    cfg = get_config(profile_to_use).to_dict()
+    print(f"Mode: {cfg['profile_name'].upper()} ({cfg['num_intersections']} intersections | {cfg['train_episodes']} train eps | {cfg['max_steps']} steps | {cfg['num_seeds']} seeds)")
 
     t0 = time.time()
     results_p2, ctrls_p2          = run_phase2(cfg)
