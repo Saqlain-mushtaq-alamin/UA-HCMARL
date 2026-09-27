@@ -1,4 +1,10 @@
-"""Smoke test: verify RL agents beat or tie fixed-time after 50 episodes × 500 steps."""
+"""
+SMOKE TEST ONLY — NOT FOR REPORTABLE BENCHMARK METRICS
+======================================================
+This script runs a fast 50-episode x 500-step functional sanity check to verify
+training loss backprop and convergence mechanics without running multi-hour simulations.
+DO NOT use the output numbers for reporting or publication tables.
+"""
 import sys; sys.path.insert(0, '.')
 import numpy as np
 from src.envs.sumo_env import SUMOEnv
@@ -10,7 +16,7 @@ from src.training.trainer import Trainer
 
 n = 4
 agent_ids = [f'intersection_{i}' for i in range(n)]
-MAX_STEPS = 500
+MAX_STEPS = 500  # Intentionally truncated for fast CI smoke testing only
 TRAIN_EPS = 50
 
 # Baseline reference
