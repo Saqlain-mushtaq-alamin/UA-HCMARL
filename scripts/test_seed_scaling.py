@@ -12,8 +12,8 @@ agent_ids = [f"intersection_{i}" for i in range(num_intersections)]
 
 ctrl = MAPPOController(agent_ids=agent_ids)
 
-for seed in [0, 1, 2, 42]:
-    env = SUMOEnv(net_file=net_file, route_file=route_file, num_intersections=num_intersections, max_steps=500, seed=seed)
+for steps in [500, 600, 700, 800, 1000]:
+    env = SUMOEnv(net_file=net_file, route_file=route_file, num_intersections=num_intersections, max_steps=steps, seed=0)
     trainer = Trainer(env=env)
-    res = trainer.run_evaluation_episode(ctrl, max_steps=500, seed=seed)
-    print(f"seed={seed:2d}: delay={res['avg_delay']:6.2f}s, viol={res['constraint_violation_rate']*100:.1f}%")
+    res = trainer.run_evaluation_episode(ctrl, max_steps=steps, seed=0)
+    print(f"max_steps={steps:4d}: delay={res['avg_delay']:6.2f}s, viol={res['constraint_violation_rate']*100:.1f}%")
