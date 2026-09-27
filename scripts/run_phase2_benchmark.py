@@ -163,18 +163,17 @@ def run_phase2_benchmark(
     # 2. Evaluate across Seeds & Noise Sweeps
     # ------------------------------------------------------------------
     print("\n[Step 2/3] Evaluating All Baselines across Seeds & Noise Protocol...")
-    benchmark_results: Dict[str, Dict[str, Dict[str, List[float]]]] = {
-        noise: {m: {"avg_delay": [], "violation_rate": []} for m in methods}
-        for noise in noise_scenarios
-    }
+    raw_path = os.path.join(output_dir, "phase2_raw_results.json")
+    checkpointer = ResultCheckpointer(raw_path, scenarios=noise_scenarios, methods=methods)
 
     for noise in noise_scenarios:
         noise_index = noise_scenarios.index(noise)   # Bug 1.1: encode noise level in seed
         print(f"\n  Testing Noise Scenario: [{noise.upper()}] (noise_index={noise_index})")
         for seed in range(num_seeds):
-            # Each (noise, seed) pair gets its own environment.
-            # The env seed encodes the noise_index so that different noise scenarios
-            # use genuinely different Poisson arrival realizations.
+            all_done = all(checkpointer.is_completed(noise, m_name, seed) for m_name in methods)
+            if all_done:
+                continue
+
             env_seed = seed + 1000 + noise_index * 10000  # Bug 1.1 fix
             env_eval = SUMOEnv(
                 net_file=net_file,
@@ -188,13 +187,13 @@ def run_phase2_benchmark(
             trainer_eval = Trainer(env=env_eval)
 
             for m_name in methods:
+                if checkpointer.is_completed(noise, m_name, seed):
+                    continue
                 ctrl = controllers[m_name]
-                # Average over multiple eval roll-outs per seed
                 seed_delays = []
                 seed_viols = []
                 for eval_ep in range(eval_episodes_per_seed):
                     _reset_lagrangian_state(ctrl)
-                    # ep_seed also encodes noise_index to prevent cross-contamination
                     ep_seed = seed + 1000 + eval_ep * 100 + noise_index * 10000  # Bug 1.1 fix
                     ep_summary = trainer_eval.run_evaluation_episode(
                         ctrl, max_steps=max_steps, seed=ep_seed
@@ -202,17 +201,23 @@ def run_phase2_benchmark(
                     seed_delays.append(ep_summary["avg_delay"])
                     seed_viols.append(ep_summary["constraint_violation_rate"])
 
-                benchmark_results[noise][m_name]["avg_delay"].append(float(np.mean(seed_delays)))
-                benchmark_results[noise][m_name]["violation_rate"].append(float(np.mean(seed_viols)))
+                checkpointer.record_result(
+                    scenario=noise,
+                    method=m_name,
+                    avg_delay=float(np.mean(seed_delays)),
+                    violation_rate=float(np.mean(seed_viols)),
+                )
 
+        benchmark_results = checkpointer.get_results()
         for m_name in methods:
-            m_delay = float(np.mean(benchmark_results[noise][m_name]["avg_delay"]))
-            m_viol  = float(np.mean(benchmark_results[noise][m_name]["violation_rate"]))
+            m_delay = float(np.mean(benchmark_results[noise][m_name]["avg_delay"])) if benchmark_results[noise][m_name]["avg_delay"] else float("nan")
+            m_viol  = float(np.mean(benchmark_results[noise][m_name]["violation_rate"])) if benchmark_results[noise][m_name]["violation_rate"] else float("nan")
             print(f"    {m_name:12s} | Delay: {m_delay:6.2f} s | Violation Rate: {m_viol*100.0:5.1f}%")
 
     # ------------------------------------------------------------------
     # 3. Save Raw Results
     # ------------------------------------------------------------------
+    benchmark_results = checkpointer.get_results()
     raw_path = os.path.join(output_dir, "phase2_raw_results.json")
     with open(raw_path, "w") as f:
         json.dump(benchmark_results, f, indent=2)
