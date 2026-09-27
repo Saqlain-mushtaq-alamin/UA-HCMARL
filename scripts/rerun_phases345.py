@@ -39,16 +39,19 @@ from src.training.bse_trainer import (
 from src.evaluation.statistical import generate_statistical_report
 from src.evaluation.metrics import compute_robustness_degradation_slope
 
-NOISE_SCENARIOS = ["clean", "mild", "moderate", "severe", "extreme"]
-NOISE_LEVELS    = [0.0, 0.1, 0.2, 0.3, 0.5]
-N          = 4
+from experiment_config import get_config
+
+_cfg = get_config("canonical")
+NOISE_SCENARIOS = _cfg.noise_scenarios
+NOISE_LEVELS    = _cfg.noise_levels
+N          = _cfg.num_intersections
 AGENT_IDS  = [f"intersection_{i}" for i in range(N)]
-MAX_STEPS  = 500
-N_SEEDS    = 5
-N_EVAL     = 2
-TRAIN_EPS  = 100
-BSE_EPOCHS = 40
-BSE_STEPS  = 1500
+MAX_STEPS  = _cfg.max_steps
+N_SEEDS    = _cfg.num_seeds
+N_EVAL     = _cfg.eval_episodes_per_seed
+TRAIN_EPS  = _cfg.train_episodes
+BSE_EPOCHS = _cfg.bse_epochs
+BSE_STEPS  = _cfg.bse_steps
 
 
 def _reset_lag(ctrl):
