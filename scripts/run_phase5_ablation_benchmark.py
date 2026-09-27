@@ -160,8 +160,10 @@ def run_phase5_ablation_benchmark(
         for ep in range(train_curriculum_episodes):
             trainer.train_episode(ctrl, max_steps=max_steps, seed=42 + ep)
 
+from checkpointed_runner import ResultCheckpointer
+
     # -----------------------------------------------------------------
-    # Step 2: Multi-Seed Evaluation Across Noise Protocol
+    # Step 2: Multi-Seed Evaluation Across Noise Protocol (Checkpointed & Resumable)
     # -----------------------------------------------------------------
     print("\n[Step 2/4] Evaluating Ablation Matrix across Noise Protocol...")
     ablations = {
@@ -174,15 +176,18 @@ def run_phase5_ablation_benchmark(
         "A6: MAPPO (Floor)": a6_mappo,
     }
 
-    results: Dict[str, Dict[str, Dict[str, List[float]]]] = {
-        noise: {a: {"avg_delay": [], "violation_rate": []} for a in ablations.keys()}
-        for noise in noise_scenarios
-    }
+    raw_results_path = os.path.join(output_dir, "phase5_raw_results.json")
+    checkpointer = ResultCheckpointer(raw_results_path, scenarios=noise_scenarios, methods=list(ablations.keys()))
 
     for noise in noise_scenarios:
         noise_index = noise_scenarios.index(noise)  # Bug 1.1: encode noise in seed
         print(f"\n  Testing Scenario: [{noise.upper()}] (noise_index={noise_index})")
         for seed in range(num_seeds):
+            # Check if all ablation methods for this seed are already recorded
+            all_methods_done = all(checkpointer.is_completed(noise, a_name, seed) for a_name in ablations.keys())
+            if all_methods_done:
+                continue
+
             env_seed = seed + noise_index * 10000   # Bug 1.1 fix
             env_eval = SUMOEnv(
                 net_file=net_file,
@@ -195,14 +200,21 @@ def run_phase5_ablation_benchmark(
             trainer_eval = Trainer(env=env_eval)
 
             for a_name, ctrl in ablations.items():
+                if checkpointer.is_completed(noise, a_name, seed):
+                    continue
                 ep_seed = seed + noise_index * 10000  # Bug 1.1 fix
                 summary = trainer_eval.run_evaluation_episode(ctrl, max_steps=max_steps, seed=ep_seed)
-                results[noise][a_name]["avg_delay"].append(summary["avg_delay"])
-                results[noise][a_name]["violation_rate"].append(summary["constraint_violation_rate"])
+                checkpointer.record_result(
+                    scenario=noise,
+                    method=a_name,
+                    avg_delay=summary["avg_delay"],
+                    violation_rate=summary["constraint_violation_rate"],
+                )
 
+        results = checkpointer.get_results()
         for a_name in ablations.keys():
-            m_delay = float(np.mean(results[noise][a_name]["avg_delay"]))
-            m_viol = float(np.mean(results[noise][a_name]["violation_rate"]))
+            m_delay = float(np.mean(results[noise][a_name]["avg_delay"])) if results[noise][a_name]["avg_delay"] else float("nan")
+            m_viol = float(np.mean(results[noise][a_name]["violation_rate"])) if results[noise][a_name]["violation_rate"] else float("nan")
             print(f"    {a_name:30s} | Delay: {m_delay:6.2f} s | Violation Rate: {m_viol*100.0:5.1f}%")
 
         if noise == "clean":
@@ -212,6 +224,8 @@ def run_phase5_ablation_benchmark(
                 "  The noise-uncertainty mechanisms they isolate are near-inert without sensor noise.\n"
                 "  Use moderate/severe/extreme results as the primary novelty evidence."
             )
+
+    results = checkpointer.get_results()
 
     # -----------------------------------------------------------------
     # Step 3: Statistical Significance & Bonferroni Correction
