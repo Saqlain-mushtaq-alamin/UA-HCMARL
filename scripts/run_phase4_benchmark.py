@@ -32,13 +32,14 @@ from src.training.trainer import Trainer
 from src.training.bse_trainer import collect_bse_dataset, train_bse_supervised
 from src.evaluation.statistical import generate_statistical_report
 from src.evaluation.visualize import setup_plot_style, plot_robustness_degradation, plot_constraint_violations
+from checkpointed_runner import ResultCheckpointer
 
 
 def run_phase4_benchmark(
     net_file: str = "networks/grid4x4/grid4x4.net.xml",
     route_file: str = "networks/grid4x4/demand_uniform.rou.xml",
     num_intersections: int = 16,
-    num_seeds: int = 5,
+    num_seeds: int = 10,
     max_steps: int = 3600,   # FIX: was 100 (only 100 s of simulation — far too short)
     output_dir: str = "experiments/phase4_full_hierarchy",
 ):
