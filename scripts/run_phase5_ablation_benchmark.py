@@ -51,6 +51,7 @@ from src.training.trainer import Trainer
 from src.training.bse_trainer import collect_bse_dataset, train_bse_supervised
 from src.evaluation.statistical import generate_statistical_report, wilcoxon_test, compute_cohens_d
 from src.evaluation.visualize import setup_plot_style, plot_robustness_degradation, plot_constraint_violations
+from checkpointed_runner import ResultCheckpointer
 
 
 def generate_latex_table(results_clean: Dict[str, Dict[str, List[float]]], add_footnote: bool = True) -> str:
@@ -159,8 +160,6 @@ def run_phase5_ablation_benchmark(
     for ctrl in [a0_full, a1_no_hier, a2_no_bse, a3_no_coupling, a4_no_const, a5_mappo_lce, a6_mappo]:
         for ep in range(train_curriculum_episodes):
             trainer.train_episode(ctrl, max_steps=max_steps, seed=42 + ep)
-
-from checkpointed_runner import ResultCheckpointer
 
     # -----------------------------------------------------------------
     # Step 2: Multi-Seed Evaluation Across Noise Protocol (Checkpointed & Resumable)
