@@ -32,7 +32,9 @@ from src.training.bse_trainer import (
 )
 from src.evaluation.statistical import generate_statistical_report
 from src.evaluation.visualize import setup_plot_style, plot_robustness_degradation, plot_constraint_violations
+import argparse
 from checkpointed_runner import ResultCheckpointer
+from experiment_config import get_config
 
 
 def run_phase3_benchmark(
@@ -212,5 +214,48 @@ def run_phase3_benchmark(
     print("==========================================================")
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Phase 3 Benchmark Runner (Belief State Encoder)")
+    parser.add_argument("--profile", type=str, default=None, choices=["canonical", "fast", "smoke"],
+                        help="Configuration profile to execute (canonical, fast, smoke)")
+    parser.add_argument("--num-seeds", type=int, default=10,
+                        help="Number of random seeds for evaluation")
+    parser.add_argument("--train-episodes", type=int, default=100,
+                        help="Number of training episodes")
+    parser.add_argument("--max-steps", type=int, default=3600,
+                        help="Number of simulation steps per episode")
+    parser.add_argument("--output-dir", type=str, default="experiments/phase3_belief_encoder",
+                        help="Output directory for results and figures")
+
+    args = parser.parse_args()
+
+    net_file = "networks/grid4x4/grid4x4.net.xml"
+    route_file = "networks/grid4x4/demand_uniform.rou.xml"
+    num_intersections = 16
+    num_seeds = args.num_seeds
+    train_episodes = args.train_episodes
+    max_steps = args.max_steps
+
+    if args.profile:
+        cfg = get_config(args.profile)
+        net_file = cfg.net_file
+        route_file = cfg.route_file
+        num_intersections = cfg.num_intersections
+        if args.num_seeds == parser.get_default("num_seeds"):
+            num_seeds = cfg.num_seeds
+        if args.max_steps == parser.get_default("max_steps"):
+            max_steps = cfg.max_steps
+
+    run_phase3_benchmark(
+        net_file=net_file,
+        route_file=route_file,
+        num_intersections=num_intersections,
+        num_seeds=num_seeds,
+        train_episodes=train_episodes,
+        max_steps=max_steps,
+        output_dir=args.output_dir,
+    )
+
+
 if __name__ == "__main__":
-    run_phase3_benchmark()
+    main()
