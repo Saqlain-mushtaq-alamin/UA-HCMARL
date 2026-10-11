@@ -133,18 +133,39 @@ class IPPOController:
         self, obs_dict: Dict[str, np.ndarray], evaluate: bool = False, step_count: int = 0
     ) -> Dict[str, int]:
         actions = {}
-        for aid, obs in obs_dict.items():
-            if aid in self.agents:
-                act, log_prob, val = self.select_action(aid, obs, evaluate=evaluate)
-                actions[aid] = act
-                if not evaluate:
-                    self.buffers[aid]["obs"].append(obs)
-                    self.buffers[aid]["actions"].append(act)
-                    self.buffers[aid]["log_probs"].append(log_prob)
-                    self.buffers[aid]["values"].append(val)
-            else:
-                actions[aid] = 0
+        with torch.no_grad():
+            for aid in self.agent_ids:
+                if aid in self.agents and aid in obs_dict:
+                    agent = self.agents[aid]
+                    agent.eval()
+                    obs = obs_dict[aid]
+                    obs_t = torch.from_numpy(obs).unsqueeze(0).to(self.device)
+                    if evaluate:
+                        logits = agent.actor(obs_t)
+                        act = int(torch.argmax(logits, dim=-1).item())
+                        actions[aid] = act
+                    else:
+                        act_t, lp_t, _, val_t = agent.get_action_and_value(obs_t)
+                        act = int(act_t.item())
+                        actions[aid] = act
+                        self.buffers[aid]["obs"].append(obs)
+                        self.buffers[aid]["actions"].append(act)
+                        self.buffers[aid]["log_probs"].append(float(lp_t.item()))
+                        self.buffers[aid]["values"].append(float(val_t.item()))
+                else:
+                    actions[aid] = 0
         return actions
+
+    def save_model(self, path: str):
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        torch.save({aid: agent.state_dict() for aid, agent in self.agents.items()}, path)
+
+    def load_model(self, path: str):
+        state_dicts = torch.load(path, map_location=self.device, weights_only=False)
+        for aid, agent in self.agents.items():
+            if aid in state_dicts:
+                agent.load_state_dict(state_dicts[aid])
 
     def store_transition(self, rewards: Dict[str, float], dones: Dict[str, bool]):
         for aid in self.agent_ids:
@@ -194,46 +215,32 @@ class IPPOController:
             optimizer = self.optimizers[aid]
             agent.train()
 
-            dataset_size = num_steps
-            indices = np.arange(dataset_size)
-
             for _ in range(num_epochs):
-                np.random.shuffle(indices)
-                for start in range(0, dataset_size, batch_size):
-                    end = start + batch_size
-                    batch_idx = indices[start:end]
+                _, new_lp, entropy, new_val = agent.get_action_and_value(obs, actions)
 
-                    b_obs = obs[batch_idx]
-                    b_act = actions[batch_idx]
-                    b_old_lp = old_log_probs[batch_idx]
-                    b_adv = adv_t[batch_idx]
-                    b_ret = ret_t[batch_idx]
+                ratio = torch.exp(new_lp - old_log_probs)
+                surr1 = ratio * adv_t
+                surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * adv_t
+                policy_loss = -torch.min(surr1, surr2).mean()
 
-                    _, new_lp, entropy, new_val = agent.get_action_and_value(b_obs, b_act)
+                value_loss = nn.functional.mse_loss(new_val, ret_t)
+                entropy_loss = -entropy.mean()
 
-                    ratio = torch.exp(new_lp - b_old_lp)
-                    surr1 = ratio * b_adv
-                    surr2 = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * b_adv
-                    policy_loss = -torch.min(surr1, surr2).mean()
+                total_loss = (
+                    policy_loss
+                    + self.value_coef * value_loss
+                    + self.entropy_coef * entropy_loss
+                )
 
-                    value_loss = nn.functional.mse_loss(new_val, b_ret)
-                    entropy_loss = -entropy.mean()
+                optimizer.zero_grad()
+                total_loss.backward()
+                nn.utils.clip_grad_norm_(agent.parameters(), max_norm=0.5)
+                optimizer.step()
 
-                    total_loss = (
-                        policy_loss
-                        + self.value_coef * value_loss
-                        + self.entropy_coef * entropy_loss
-                    )
-
-                    optimizer.zero_grad()
-                    total_loss.backward()
-                    nn.utils.clip_grad_norm_(agent.parameters(), max_norm=0.5)
-                    optimizer.step()
-
-                    losses["policy_loss"] += policy_loss.item()
-                    losses["value_loss"] += value_loss.item()
-                    losses["entropy_loss"] += entropy_loss.item()
-                    num_updates += 1
+                losses["policy_loss"] += policy_loss.item()
+                losses["value_loss"] += value_loss.item()
+                losses["entropy_loss"] += entropy_loss.item()
+                num_updates += 1
 
         self.reset_buffers()
         if num_updates > 0:
