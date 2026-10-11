@@ -127,28 +127,52 @@ class MAPPOLCEController:
             r_val = float(self.reward_critic(gs_t).item())
             c_val = float(self.cost_critic(gs_t).item())
 
-            for aid in self.agent_ids:
-                obs = obs_dict.get(aid, np.zeros(self.obs_dim, dtype=np.float32))
-                obs_t = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-
-                actor = self.shared_actor if self.share_actor else self.actors[aid]
-                actor.eval()
-                dist = actor(obs_t)
+            if self.share_actor:
+                obs_list = [obs_dict.get(aid, np.zeros(self.obs_dim, dtype=np.float32)) for aid in self.agent_ids]
+                obs_arr = np.array(obs_list, dtype=np.float32)
+                obs_t = torch.from_numpy(obs_arr).to(self.device)
+                self.shared_actor.eval()
+                dist = self.shared_actor(obs_t)
 
                 if evaluate:
                     act_t = torch.argmax(dist.logits, dim=-1)
-                    log_prob_t = torch.zeros(1, device=self.device)
+                    acts = act_t.cpu().numpy()
+                    for idx, aid in enumerate(self.agent_ids):
+                        actions[aid] = int(acts[idx])
                 else:
                     act_t = dist.sample()
                     log_prob_t = dist.log_prob(act_t)
+                    acts = act_t.cpu().numpy()
+                    lps = log_prob_t.cpu().numpy()
+                    for idx, aid in enumerate(self.agent_ids):
+                        act = int(acts[idx])
+                        actions[aid] = act
+                        self.buffer["obs"][aid].append(obs_list[idx])
+                        self.buffer["actions"][aid].append(act)
+                        self.buffer["log_probs"][aid].append(float(lps[idx]))
+            else:
+                for aid in self.agent_ids:
+                    obs = obs_dict.get(aid, np.zeros(self.obs_dim, dtype=np.float32))
+                    obs_t = torch.tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
 
-                act = int(act_t.item())
-                actions[aid] = act
+                    actor = self.actors[aid]
+                    actor.eval()
+                    dist = actor(obs_t)
 
-                if not evaluate:
-                    self.buffer["obs"][aid].append(obs)
-                    self.buffer["actions"][aid].append(act)
-                    self.buffer["log_probs"][aid].append(float(log_prob_t.item()))
+                    if evaluate:
+                        act_t = torch.argmax(dist.logits, dim=-1)
+                        log_prob_t = torch.zeros(1, device=self.device)
+                    else:
+                        act_t = dist.sample()
+                        log_prob_t = dist.log_prob(act_t)
+
+                    act = int(act_t.item())
+                    actions[aid] = act
+
+                    if not evaluate:
+                        self.buffer["obs"][aid].append(obs)
+                        self.buffer["actions"][aid].append(act)
+                        self.buffer["log_probs"][aid].append(float(log_prob_t.item()))
 
             if not evaluate:
                 self.buffer["global_states"].append(global_state)
@@ -156,6 +180,34 @@ class MAPPOLCEController:
                 self.buffer["cost_values"].append(c_val)
 
         return actions
+
+    def save_model(self, path: str):
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        data = {
+            "share_actor": self.share_actor,
+            "shared_actor": self.shared_actor.state_dict() if self.share_actor else None,
+            "actors": {aid: a.state_dict() for aid, a in self.actors.items()} if not self.share_actor else None,
+            "reward_critic": self.reward_critic.state_dict(),
+            "cost_critic": self.cost_critic.state_dict(),
+            "pid_lambdas": self.pid_lagrangian.lambdas if hasattr(self, "pid_lagrangian") else None,
+        }
+        torch.save(data, path)
+
+    def load_model(self, path: str):
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        if self.share_actor and checkpoint.get("shared_actor") is not None:
+            self.shared_actor.load_state_dict(checkpoint["shared_actor"])
+        elif not self.share_actor and checkpoint.get("actors") is not None:
+            for aid, a in self.actors.items():
+                if aid in checkpoint["actors"]:
+                    a.load_state_dict(checkpoint["actors"][aid])
+        if "reward_critic" in checkpoint:
+            self.reward_critic.load_state_dict(checkpoint["reward_critic"])
+        if "cost_critic" in checkpoint:
+            self.cost_critic.load_state_dict(checkpoint["cost_critic"])
+        if "pid_lambdas" in checkpoint and checkpoint["pid_lambdas"] is not None and hasattr(self, "pid_lagrangian"):
+            self.pid_lagrangian.lambdas = checkpoint["pid_lambdas"]
 
     def store_transition(
         self,
