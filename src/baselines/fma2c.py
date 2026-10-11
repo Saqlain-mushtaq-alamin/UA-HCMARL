@@ -195,36 +195,58 @@ class FMA2CController:
                         self.manager_buffer[r_idx]["goals"].append(goal_np)
                         self.manager_buffer[r_idx]["values"].append(float(val_t.item()))
 
-        # 2. Worker action selection
+        # 2. Worker action selection (batched across agents)
         self.worker.eval()
         with torch.no_grad():
+            worker_inputs = []
             for aid in self.agent_ids:
                 obs = obs_dict.get(aid, np.zeros(self.obs_dim, dtype=np.float32))
                 r_idx = self.agent_to_region[aid]
                 goal = self.current_goals[r_idx]
+                worker_inputs.append(np.concatenate([obs, goal], axis=0))
 
-                input_vec = np.concatenate([obs, goal], axis=0)
-                input_t = torch.tensor(input_vec, dtype=torch.float32, device=self.device).unsqueeze(0)
+            w_in_arr = np.array(worker_inputs, dtype=np.float32)
+            w_in_t = torch.from_numpy(w_in_arr).to(self.device)
+            dist, val_t = self.worker(w_in_t)
 
-                dist, val_t = self.worker(input_t)
+            if evaluate:
+                act_t = torch.argmax(dist.logits, dim=-1)
+                acts = act_t.cpu().numpy()
+                for idx, aid in enumerate(self.agent_ids):
+                    actions[aid] = int(acts[idx])
+            else:
+                act_t = dist.sample()
+                log_prob_t = dist.log_prob(act_t)
+                acts = act_t.cpu().numpy()
+                lps = log_prob_t.cpu().numpy()
+                vals = val_t.cpu().numpy()
 
-                if evaluate:
-                    act_t = torch.argmax(dist.logits, dim=-1)
-                    log_prob_val = 0.0
-                else:
-                    act_t = dist.sample()
-                    log_prob_val = float(dist.log_prob(act_t).item())
-
-                act = int(act_t.item())
-                actions[aid] = act
-
-                if not evaluate:
-                    self.worker_buffer[aid]["obs_goal"].append(input_vec)
+                for idx, aid in enumerate(self.agent_ids):
+                    act = int(acts[idx])
+                    actions[aid] = act
+                    self.worker_buffer[aid]["obs_goal"].append(worker_inputs[idx])
                     self.worker_buffer[aid]["actions"].append(act)
-                    self.worker_buffer[aid]["log_probs"].append(log_prob_val)
-                    self.worker_buffer[aid]["values"].append(float(val_t.item()))
+                    self.worker_buffer[aid]["log_probs"].append(float(lps[idx]))
+                    self.worker_buffer[aid]["values"].append(float(vals[idx]))
 
         return actions
+
+    def save_model(self, path: str):
+        import os
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        torch.save({
+            "managers": {r: m.state_dict() for r, m in self.managers.items()},
+            "worker": self.worker.state_dict(),
+        }, path)
+
+    def load_model(self, path: str):
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        if "managers" in checkpoint:
+            for r, m in self.managers.items():
+                if r in checkpoint["managers"]:
+                    m.load_state_dict(checkpoint["managers"][r])
+        if "worker" in checkpoint:
+            self.worker.load_state_dict(checkpoint["worker"])
 
     def store_transition(self, rewards: Dict[str, float], dones: Dict[str, bool]):
         is_done = any(dones.values())
