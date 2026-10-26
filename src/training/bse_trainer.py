@@ -39,9 +39,11 @@ def collect_bse_dataset(
     num_steps: int = 1000,
     history_len: int = 5,
     noise_scenarios: List[str] = None,
+    seed: int = 42,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Collects dataset of (noisy_obs_history, ground_truth_state) pairs across noise profiles.
+    Allows independent seeds for train and test splits to prevent data contamination.
     """
     if noise_scenarios is None:
         noise_scenarios = ["clean", "mild", "moderate", "severe", "extreme"]
@@ -49,9 +51,9 @@ def collect_bse_dataset(
     history_samples = []
     ground_truth_samples = []
 
-    for noise in noise_scenarios:
+    for idx, noise in enumerate(noise_scenarios):
         env.noise_injector.set_scenario(noise)
-        obs_dict, _ = env.reset(seed=42)
+        obs_dict, _ = env.reset(seed=seed + idx * 1000)
         agent_ids = list(obs_dict.keys())
         agent_histories = {aid: [obs_dict[aid]] * history_len for aid in agent_ids}
 
