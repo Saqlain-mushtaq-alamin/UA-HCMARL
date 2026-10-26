@@ -66,8 +66,8 @@ def run_phase3_benchmark(
         seed=42,
     )
     print("  -> Collecting (o_noisy, s_true) training pairs across noise levels...")
-    X_train, Y_train = collect_bse_dataset(env_data, num_steps=2000, noise_scenarios=noise_scenarios)
-    X_test, Y_test = collect_bse_dataset(env_data, num_steps=500, noise_scenarios=noise_scenarios)
+    X_train, Y_train = collect_bse_dataset(env_data, num_steps=2000, noise_scenarios=noise_scenarios, seed=42)
+    X_test, Y_test = collect_bse_dataset(env_data, num_steps=500, noise_scenarios=noise_scenarios, seed=1042)
 
     # Instantiate Stage 3 controller & pre-train its BSE
     bse_mappo_lce = BSEMAPPOLCEController(agent_ids=agent_ids, use_confidence_modulation=True, freeze_bse=False)
@@ -81,6 +81,10 @@ def run_phase3_benchmark(
     calib_metrics = evaluate_bse_calibration(bse_mappo_lce.bse, X_test, Y_test)
     print(f"  * Raw MSE: {calib_metrics['raw_mse']:.4f} | BSE MSE: {calib_metrics['bse_mse']:.4f} ({calib_metrics['mse_reduction_pct']:.1f}% reduction)")
     print(f"  * Sigma Calibration Correlation r(sigma, err): {calib_metrics['sigma_calibration_correlation']:.3f}")
+
+    # Save real calibration metrics immediately
+    with open(os.path.join(output_dir, "bse_calibration_metrics.json"), "w") as f:
+        json.dump(calib_metrics, f, indent=2)
 
     # -----------------------------------------------------------------
     # Step 2: Training Curriculum (Phases B & C)
