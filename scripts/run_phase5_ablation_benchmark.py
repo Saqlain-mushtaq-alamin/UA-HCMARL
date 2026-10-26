@@ -38,6 +38,8 @@ import matplotlib.pyplot as plt
 # Ensure project root is in python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import argparse
+from experiment_config import get_config
 from src.envs.sumo_env import SUMOEnv
 from src.baselines.fixed_time import FixedTimeController
 from src.baselines.actuated import ActuatedController
@@ -103,8 +105,11 @@ def run_phase5_ablation_benchmark(
     net_file: str = "networks/grid4x4/grid4x4.net.xml",
     route_file: str = "networks/grid4x4/demand_uniform.rou.xml",
     num_intersections: int = 16,
-    num_seeds: int = 10,        # Bug 1.2: raised from 5
-    max_steps: int = 3600,      # Bug 1.2: raised from 100 (100 steps = 100 s, far too short)
+    num_seeds: int = 10,        # Canonical publication standard: 10 seeds
+    max_steps: int = 3600,      # Canonical publication standard: 3600 steps
+    train_curriculum_episodes: int = 5,
+    bse_steps: int = 300,
+    bse_epochs: int = 3,
     output_dir: str = "experiments/phase5_ablations",
 ):
     os.makedirs(output_dir, exist_ok=True)
@@ -173,14 +178,13 @@ def run_phase5_ablation_benchmark(
     )
 
     # Pretrain BSE for controllers that use it with independent training seed
-    X_tr, Y_tr = collect_bse_dataset(env_train, num_steps=300, noise_scenarios=noise_scenarios, seed=42)
-    train_bse_supervised(a0_full.bse, X_tr, Y_tr, epochs=3)
-    train_bse_supervised(a1_no_hier.bse, X_tr, Y_tr, epochs=3)
-    train_bse_supervised(a3_no_coupling.bse, X_tr, Y_tr, epochs=3)
-    train_bse_supervised(a4_no_const.bse, X_tr, Y_tr, epochs=3)
-    train_bse_supervised(a0_const_sigma.bse, X_tr, Y_tr, epochs=3)
+    X_tr, Y_tr = collect_bse_dataset(env_train, num_steps=bse_steps, noise_scenarios=noise_scenarios, seed=42)
+    train_bse_supervised(a0_full.bse, X_tr, Y_tr, epochs=bse_epochs)
+    train_bse_supervised(a1_no_hier.bse, X_tr, Y_tr, epochs=bse_epochs)
+    train_bse_supervised(a3_no_coupling.bse, X_tr, Y_tr, epochs=bse_epochs)
+    train_bse_supervised(a4_no_const.bse, X_tr, Y_tr, epochs=bse_epochs)
+    train_bse_supervised(a0_const_sigma.bse, X_tr, Y_tr, epochs=bse_epochs)
 
-    train_curriculum_episodes = 5
     print(f"  -> Training ALL Ablation Controllers across {train_curriculum_episodes} Curriculum Episodes...")
     for ctrl in [a0_full, a1_no_hier, a2_no_bse, a3_no_coupling, a4_no_const, a5_mappo_lce, a6_mappo, a0_const_sigma]:
         for ep in range(train_curriculum_episodes):
@@ -303,9 +307,9 @@ def run_phase5_ablation_benchmark(
     plot_robustness_degradation(noise_scenarios, delay_sweeps, output_path=os.path.join(output_dir, "fig1_robustness_curves.png"))
 
     # Fig 2: Ablation Component Breakdown under Severe Noise (Real Measured Queues)
-    fig, ax = plt.subplots(figsize=(8, 4.5), dpi=300)
+    fig, ax = plt.subplots(figsize=(9, 4.5), dpi=300)
     sev_delays = [float(np.mean(results["severe"][a]["avg_delay"])) for a in names_list]
-    colors = ["#2ca02c", "#1f77b4", "#ff7f0e", "#d62728", "#9467bd", "#8c564b", "#7f7f7f"]
+    colors = plt.cm.tab10(np.linspace(0, 1, len(names_list)))
     bars = ax.bar(names_list, sev_delays, color=colors, edgecolor="black", width=0.5)
     for bar in bars:
         ax.text(bar.get_x() + bar.get_width() / 2.0, bar.get_height() + 0.2, f"{bar.get_height():.1f} veh", ha="center", va="bottom", fontsize=8)
@@ -321,5 +325,55 @@ def run_phase5_ablation_benchmark(
     print("==========================================================")
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Phase 5 Controlled Ablation Benchmark Runner")
+    parser.add_argument("--profile", type=str, default=None, choices=["canonical", "fast", "smoke"],
+                        help="Configuration profile to execute (canonical, fast, smoke)")
+    parser.add_argument("--num-seeds", type=int, default=10,
+                        help="Number of random seeds for evaluation")
+    parser.add_argument("--max-steps", type=int, default=3600,
+                        help="Number of simulation steps per episode")
+    parser.add_argument("--curriculum-episodes", type=int, default=5,
+                        help="Number of curriculum training episodes per variant")
+    parser.add_argument("--output-dir", type=str, default="experiments/phase5_ablations",
+                        help="Output directory for results and figures")
+
+    args = parser.parse_args()
+
+    net_file = "networks/grid4x4/grid4x4.net.xml"
+    route_file = "networks/grid4x4/demand_uniform.rou.xml"
+    num_intersections = 16
+    num_seeds = args.num_seeds
+    max_steps = args.max_steps
+    curriculum_episodes = args.curriculum_episodes
+    bse_steps = 300
+    bse_epochs = 3
+
+    if args.profile:
+        cfg = get_config(args.profile)
+        net_file = cfg.net_file
+        route_file = cfg.route_file
+        num_intersections = cfg.num_intersections
+        if args.num_seeds == parser.get_default("num_seeds"):
+            num_seeds = cfg.num_seeds
+        if args.max_steps == parser.get_default("max_steps"):
+            max_steps = cfg.max_steps
+        curriculum_episodes = cfg.train_curriculum_episodes
+        bse_steps = cfg.bse_steps
+        bse_epochs = cfg.bse_epochs
+
+    run_phase5_ablation_benchmark(
+        net_file=net_file,
+        route_file=route_file,
+        num_intersections=num_intersections,
+        num_seeds=num_seeds,
+        max_steps=max_steps,
+        train_curriculum_episodes=curriculum_episodes,
+        bse_steps=bse_steps,
+        bse_epochs=bse_epochs,
+        output_dir=args.output_dir,
+    )
+
+
 if __name__ == "__main__":
-    run_phase5_ablation_benchmark()
+    main()
