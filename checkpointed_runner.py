@@ -85,15 +85,29 @@ class ResultCheckpointer:
         # Both must be present and length must exceed the requested seed index
         return len(delays) > seed_index and len(viols) > seed_index
 
-    def record_result(self, scenario: str, method: str, avg_delay: float, violation_rate: float):
+    def record_result(
+        self,
+        scenario: str,
+        method: str,
+        avg_delay: float,
+        violation_rate: float,
+        throughput: Optional[float] = None,
+        **kwargs,
+    ):
         """Appends result and immediately performs an atomic flush to disk."""
         if scenario not in self.results:
             self.results[scenario] = {}
         if method not in self.results[scenario]:
-            self.results[scenario][method] = {"avg_delay": [], "violation_rate": []}
+            self.results[scenario][method] = {"avg_delay": [], "violation_rate": [], "throughput": []}
 
-        self.results[scenario][method]["avg_delay"].append(float(avg_delay))
-        self.results[scenario][method]["violation_rate"].append(float(violation_rate))
+        self.results[scenario][method].setdefault("avg_delay", []).append(float(avg_delay))
+        self.results[scenario][method].setdefault("violation_rate", []).append(float(violation_rate))
+        if throughput is not None:
+            self.results[scenario][method].setdefault("throughput", []).append(float(throughput))
+
+        for k, v in kwargs.items():
+            if isinstance(v, (int, float)):
+                self.results[scenario][method].setdefault(k, []).append(float(v))
 
         self.atomic_save()
 
