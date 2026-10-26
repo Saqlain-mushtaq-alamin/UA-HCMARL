@@ -112,42 +112,49 @@ class SingleIntersectionSimulator:
 
         requested_phase = action
 
-        # ── Hard max-green enforcement ────────────────────────────────────────
-        # Evaluated FIRST, before the action comparison, so it fires even when
-        # the agent keeps requesting the same phase (the previous bug was placing
-        # this inside an if/elif and never reaching it for action==current_phase).
-        if self.time_in_phase >= self.max_green and self.current_phase % 2 == 0:
-            # Force advance to yellow regardless of requested action
-            violations["green_time"] += 1
-            violation_mag += (self.time_in_phase - self.max_green + 1)
-            forced_phase = (self.current_phase + 1) % 4
-            self.current_phase = forced_phase
-            self.time_in_phase = 0
-        elif requested_phase != self.current_phase:
-            # ── Min-green masking ─────────────────────────────────────────────
-            # Count the violation but block the illegal early switch.
-            if self.time_in_phase < self.min_green:
-                violations["green_time"] += 1
-                violation_mag += (self.min_green - self.time_in_phase)
-                # Block the switch — keep current phase, increment counter
-                requested_phase = self.current_phase
-                self.time_in_phase += 1
-            else:
-                # Legal phase switch: check for phase-skip (skipping yellow)
-                if (self.current_phase % 2 == 0) and (requested_phase != self.current_phase + 1):
-                    violations["phase_skip"] += 1
-                self.current_phase = requested_phase
+        # ── Yellow Phase Non-Preemptible Clearance ────────────────────────────
+        # Phases 1 and 3 are clearance intervals (Yellow).
+        # They MUST last exactly yellow_time seconds and cannot be held or skipped.
+        if self.current_phase % 2 != 0:
+            self.time_in_phase += 1
+            if self.time_in_phase >= self.yellow_time:
+                # Automatic transition to next green (1 -> 2 E-W Green, 3 -> 0 N-S Green)
+                self.current_phase = (self.current_phase + 1) % 4
                 self.time_in_phase = 0
         else:
-            # Same phase requested, within max_green limit
-            self.time_in_phase += 1
+            # ── Green Phase Control & Enforcement ─────────────────────────────
+            # 1. Hard max-green enforcement:
+            if self.time_in_phase >= self.max_green:
+                violations["green_time"] += 1
+                violation_mag += 1.0
+                # Advance to clearance yellow
+                self.current_phase = (self.current_phase + 1) % 4
+                self.time_in_phase = 0
+            elif requested_phase != self.current_phase:
+                # 2. Min-green masking:
+                if self.time_in_phase < self.min_green:
+                    violations["green_time"] += 1
+                    violation_mag += (self.min_green - self.time_in_phase)
+                    # Block the switch — maintain green
+                    self.time_in_phase += 1
+                else:
+                    # Legitimate switch request:
+                    # Check for illegal yellow skip (e.g. requesting conflicting green directly)
+                    if requested_phase != self.current_phase + 1:
+                        violations["phase_skip"] += 1
+                    # Transition into yellow clearance phase
+                    self.current_phase = (self.current_phase + 1) % 4
+                    self.time_in_phase = 0
+            else:
+                # Maintained green within legal limits
+                self.time_in_phase += 1
 
         # Vehicle arrivals (Poisson process)
         arrivals = self.rng.poisson(self.arrival_rates)
         self.queues += arrivals
 
         # Discharge vehicles based on active phase
-        step_throughput = 0
+        step_throughput = 0.0
         discharge_rate = 0.8  # max vehicles discharged per second during green
 
         active_approaches = []
@@ -159,7 +166,7 @@ class SingleIntersectionSimulator:
         for app in active_approaches:
             discharged = min(self.queues[app], discharge_rate)
             self.queues[app] -= discharged
-            step_throughput += int(discharged)
+            step_throughput += float(discharged)
 
         # avg_queue_length = total vehicles queued across all 4 approaches THIS step.
         # NOTE: units are VEHICLES, not seconds of travel-time delay.
