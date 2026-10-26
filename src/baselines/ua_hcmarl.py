@@ -42,6 +42,8 @@ class UAHCMARLController:
         clip_ratio: float = 0.2,
         freeze_bse: bool = False,
         bypass_bse: bool = False,
+        enable_hierarchy: bool = True,
+        use_confidence_modulation: bool = True,
         disable_constraints: bool = False,
         device: str = "cpu",
     ):
@@ -54,10 +56,9 @@ class UAHCMARLController:
         self.num_regions = num_regions
         self.b_total_per_region = b_total_per_region
         self.freeze_bse = freeze_bse
-        # bypass_bse=True: skip the BSE entirely and feed raw obs to the worker.
-        # Used by A2 (No-Belief-State) to test whether the belief-state layer helps
-        # at all vs. using the raw noisy observation directly as worker input.
         self.bypass_bse = bypass_bse
+        self.enable_hierarchy = enable_hierarchy
+        self.use_confidence_modulation = use_confidence_modulation
         self.disable_constraints = disable_constraints
         self.gamma = gamma
         self.gae_lambda = gae_lambda
@@ -82,23 +83,18 @@ class UAHCMARLController:
         if not self.bypass_bse:
             self.bse = GRUKalmanNet(raw_obs_dim=obs_dim, hidden_dim=64, belief_dim=obs_dim, history_len=history_len).to(self.device)
 
-            # freeze_bse: BSE weights are pretrained but cannot adapt online.
-            # Only relevant when bypass_bse=False (A0 with online adaptation vs A0 frozen).
             if self.freeze_bse:
                 for p in self.bse.parameters():
                     p.requires_grad_(False)
         else:
-            # bypass_bse: build a stub BSE so downstream code that references
-            # self.bse (e.g. bse_trainer) doesn't raise AttributeError.
-            # The stub is never called during select_actions.
             self.bse = GRUKalmanNet(raw_obs_dim=obs_dim, hidden_dim=64, belief_dim=obs_dim, history_len=history_len).to(self.device)
             for p in self.bse.parameters():
-                p.requires_grad_(False)  # never updated; never used in forward pass
+                p.requires_grad_(False)
 
         # Layer 2: Workers
-        # When bypass_bse=True: worker receives raw obs (obs_dim dims, no sigma).
-        # When bypass_bse=False: worker receives (b_hat, sigma_hat) = obs_dim + 1 dims.
-        self.worker_obs_dim = obs_dim if self.bypass_bse else obs_dim + 1  # b_hat + sigma_hat
+        # Worker receives: [b_hat (or raw_obs), sigma_hat, norm_budget] = obs_dim + 2 dims
+        # Consistent architecture across all ablations isolates components strictly via flags.
+        self.worker_obs_dim = obs_dim + 2
         global_state_dim = self.worker_obs_dim * self.num_agents
 
         self.worker_actor = MAPPOActor(self.worker_obs_dim, action_dim).to(self.device)
@@ -106,7 +102,12 @@ class UAHCMARLController:
         self.worker_c_critic = MAPPOCentralizedCritic(global_state_dim).to(self.device)
 
         # PID Lagrangian per agent
-        self.pid_lagrangians = {aid: PIDLagrangianMultiplier(use_confidence_modulation=True) for aid in agent_ids}
+        self.pid_lagrangians = {
+            aid: PIDLagrangianMultiplier(
+                use_confidence_modulation=self.use_confidence_modulation and not self.disable_constraints
+            )
+            for aid in agent_ids
+        }
 
         # Layer 3: Regional Managers
         manager_state_dim = obs_dim + 5
