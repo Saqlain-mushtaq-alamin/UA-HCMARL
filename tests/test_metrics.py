@@ -25,7 +25,9 @@ def test_metrics_calculator():
     assert summary["avg_delay"] == 15.0
     assert summary["avg_queue_length"] == 3.0
     assert summary["total_throughput"] == 5.0
-    assert summary["constraint_violation_rate"] == 1.0
+    # 1 violation across 2 intersections in 1 step = 0.5 per-intersection rate
+    assert summary["constraint_violation_rate"] == 0.5
+    assert summary["system_violation_rate"] == 1.0
     assert summary["jains_fairness_index"] > 0.0
 
 
