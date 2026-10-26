@@ -343,12 +343,16 @@ class UAHCMARLController:
                 dist = self.worker_actor(worker_input_t)
                 logits = dist.logits.clone()
 
-                # Test-time active safety modulation:
-                # If confidence modulation is active, elevated uncertainty sigma_hat and constrained budget B_i
-                # dynamically modulate phase-switching propensity under noise.
-                if self.use_confidence_modulation and not self.disable_constraints:
+                # Test-time active safety modulation (Hand-written design component):
+                # When confidence modulation is enabled, uncertainty sigma and constrained budget B_i
+                # modulate phase-switching propensity under noise to prevent premature switches.
+                # Mode "learned": uses dynamic BSE predicted sigma_hat_val.
+                # Mode "constant": control variant with constant sigma=0.5 (tests if learned uncertainty helps vs fixed stickiness).
+                # Mode "none": disables test-time penalty.
+                if self.use_confidence_modulation and not self.disable_constraints and self.uncertainty_penalty_mode != "none":
+                    eff_sigma = 0.5 if self.uncertainty_penalty_mode == "constant" else sigma_hat_val
                     current_phase = int(raw_obs[8:12].argmax()) if len(raw_obs) >= 12 else 0
-                    uncertainty_penalty = sigma_hat_val * max(0.0, 1.5 - norm_budget)
+                    uncertainty_penalty = eff_sigma * max(0.0, 1.5 - norm_budget)
                     for a_idx in range(self.action_dim):
                         if a_idx != current_phase:
                             logits[0, a_idx] -= uncertainty_penalty * 2.0
