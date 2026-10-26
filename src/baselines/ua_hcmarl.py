@@ -45,6 +45,7 @@ class UAHCMARLController:
         enable_hierarchy: bool = True,
         use_confidence_modulation: bool = True,
         disable_constraints: bool = False,
+        uncertainty_penalty_mode: str = "learned",
         device: str = "cpu",
     ):
         self.agent_ids = agent_ids
@@ -60,6 +61,7 @@ class UAHCMARLController:
         self.enable_hierarchy = enable_hierarchy
         self.use_confidence_modulation = use_confidence_modulation
         self.disable_constraints = disable_constraints
+        self.uncertainty_penalty_mode = uncertainty_penalty_mode
         self.gamma = gamma
         self.gae_lambda = gae_lambda
         self.clip_ratio = clip_ratio
