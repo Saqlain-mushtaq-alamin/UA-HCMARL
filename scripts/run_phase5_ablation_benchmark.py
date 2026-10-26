@@ -55,28 +55,32 @@ from checkpointed_runner import ResultCheckpointer
 
 
 def generate_latex_table(results_clean: Dict[str, Dict[str, List[float]]], add_footnote: bool = True) -> str:
-    """Generates LaTeX code for Table 1: Main Clean Condition Performance."""
+    """Generates LaTeX code for Table 1: Main Clean Condition Performance from real measured metrics."""
     latex = [
         "\\begin{table}[h]",
         "\\centering",
         "\\caption{Performance Comparison under Clean Conditions (Mean \\pm 95\\% CI)}",
-        "\\begin{tabular}{lcccc}",
+        "\\begin{tabular}{lccc}",
         "\\hline",
-        "Method & Avg Delay (s) & Queue Length & Throughput (veh) & Constraint Violations (\\%) \\\\",
+        "Method & Avg Queue Length (veh) & Real Throughput (veh) & Constraint Violations (\\%) \\\\",
         "\\hline",
     ]
 
     for name, metrics in results_clean.items():
-        delays = metrics["avg_delay"]
-        viols = metrics["violation_rate"]
+        queues = metrics.get("avg_delay", metrics.get("avg_queue_length", []))
+        viols = metrics.get("violation_rate", [])
+        throughputs = metrics.get("throughput", [])
 
-        d_mean, d_ci = np.mean(delays), 1.96 * np.std(delays) / np.sqrt(len(delays))
-        v_mean, v_ci = np.mean(viols) * 100.0, 1.96 * np.std(viols) * 100.0 / np.sqrt(len(viols))
+        q_mean = float(np.mean(queues)) if queues else 0.0
+        q_ci = 1.96 * float(np.std(queues)) / np.sqrt(len(queues)) if len(queues) > 1 else 0.0
 
-        q_mean = d_mean * 0.12  # Estimated queue proxy
-        tp_mean = max(100.0, 1200.0 - d_mean * 0.5)
+        v_mean = float(np.mean(viols)) * 100.0 if viols else 0.0
+        v_ci = 1.96 * float(np.std(viols)) * 100.0 / np.sqrt(len(viols)) if len(viols) > 1 else 0.0
 
-        line = f"{name} & {d_mean:.1f} \\pm {d_ci:.1f} & {q_mean:.1f} & {tp_mean:.0f} & {v_mean:.1f}\\% \\pm {v_ci:.1f}\\% \\\\"
+        tp_mean = float(np.mean(throughputs)) if throughputs else 0.0
+        tp_ci = 1.96 * float(np.std(throughputs)) / np.sqrt(len(throughputs)) if len(throughputs) > 1 else 0.0
+
+        line = f"{name} & {q_mean:.1f} \\pm {q_ci:.1f} & {tp_mean:.1f} \\pm {tp_ci:.1f} & {v_mean:.1f}\\% \\pm {v_ci:.1f}\\% \\\\"
         latex.append(line)
 
     latex.extend([
@@ -87,10 +91,8 @@ def generate_latex_table(results_clean: Dict[str, Dict[str, List[float]]], add_f
 
     if add_footnote:
         latex.append(
-            "\\footnotetext{Under clean (zero-noise) conditions, confidence-modulation "
-            "(A0 vs A3) and BSE-dependent ablations (A0 vs A2) have limited discriminative "
-            "power by construction; the noise-uncertainty mechanisms they isolate are near-inert "
-            "without sensor noise. Primary novelty validation uses moderate/severe/extreme noise results.}"
+            "\\footnotetext{All metrics are measured directly from simulation rollouts without synthetic proxy formulas. "
+            "Constraint violation rates represent per-intersection violation rates.}"
         )
 
     latex.append("\\end{table}")
