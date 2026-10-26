@@ -318,7 +318,8 @@ class SUMOEnv(gym.Env):
 
         step_delays = {}
         step_queues = {}
-        total_step_throughput = 0
+        step_violations_per_agent = {}
+        total_step_throughput = 0.0
         total_step_violations = {"green_time": 0, "green_skip": 0, "phase_skip": 0}
         total_violation_mag = 0.0
 
@@ -341,6 +342,7 @@ class SUMOEnv(gym.Env):
 
             step_delays[i_id] = info["avg_queue_length"]   # avg_queue_length (vehicles)
             step_queues[i_id] = info["queue_length"]
+            step_violations_per_agent[i_id] = violations.copy()
             total_step_throughput += throughput
 
             for k, v in violations.items():
@@ -351,8 +353,9 @@ class SUMOEnv(gym.Env):
             "step": self.step_count,
             "step_delays": step_delays,
             "step_queues": step_queues,
-            "step_throughput": total_step_throughput,
+            "step_throughput": float(total_step_throughput),
             "step_violations": total_step_violations,
+            "step_violations_per_agent": step_violations_per_agent,
             "step_violation_magnitude": total_violation_mag,
         }
 
