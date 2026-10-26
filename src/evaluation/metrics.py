@@ -31,6 +31,7 @@ class MetricsCalculator:
         
         # Constraint tracking
         self.violations: List[Dict[str, int]] = []  # per step count of violations
+        self.violations_per_agent: List[Dict[str, Dict[str, int]]] = []
         self.violation_magnitudes: List[float] = []
         self.violation_types: Dict[str, int] = {
             "green_time": 0,
@@ -42,15 +43,16 @@ class MetricsCalculator:
         self,
         intersection_delays: Dict[str, float],
         intersection_queues: Dict[str, float],
-        step_throughput: int = 0,
+        step_throughput: float = 0.0,
         step_travel_time: Optional[float] = None,
         step_violations: Optional[Dict[str, int]] = None,
         step_violation_magnitude: float = 0.0,
+        step_violations_per_agent: Optional[Dict[str, Dict[str, int]]] = None,
     ):
         """Record metrics for a single simulation step."""
         self.delays.append(intersection_delays)
         self.queue_lengths.append(intersection_queues)
-        self.throughputs.append(step_throughput)
+        self.throughputs.append(float(step_throughput))
         
         if step_travel_time is not None and step_travel_time > 0:
             self.travel_times.append(step_travel_time)
@@ -64,6 +66,9 @@ class MetricsCalculator:
                     self.violation_types[vtype] = count
         else:
             self.violations.append({})
+
+        if step_violations_per_agent:
+            self.violations_per_agent.append(step_violations_per_agent)
 
         self.violation_magnitudes.append(step_violation_magnitude)
 
@@ -79,14 +84,37 @@ class MetricsCalculator:
         all_queues = [val for q in self.queue_lengths for val in q.values()]
         avg_queue = float(np.mean(all_queues)) if all_queues else 0.0
 
-        total_throughput = int(np.sum(self.throughputs))
+        total_throughput = float(np.sum(self.throughputs))
         avg_travel_time = float(np.mean(self.travel_times)) if self.travel_times else 0.0
 
-        # 2. Constraint Metrics
+        # 2. Constraint Metrics (Per-Intersection & System-Level)
         total_steps = len(self.delays)
+        num_intersections = len(self.delays[0]) if self.delays else 1
+        total_agent_steps = max(1, total_steps * num_intersections)
+
+        # True per-intersection violation rate: fraction of intersection-steps that violated
+        if self.violations_per_agent:
+            violating_agent_steps = sum(
+                1 for step_v in self.violations_per_agent
+                for a_v in step_v.values()
+                if sum(a_v.values()) > 0
+            )
+            per_int_violation_rate = float(violating_agent_steps / total_agent_steps)
+        else:
+            # Fallback when per-agent breakdown is omitted: normalize total violations by agent-steps
+            total_viol_events = sum(sum(v.values()) for v in self.violations)
+            per_int_violation_rate = min(1.0, float(total_viol_events / total_agent_steps))
+
+        # System-level violation rate (any intersection violated in that step)
         steps_with_violation = sum(1 for v in self.violations if sum(v.values()) > 0)
-        violation_rate = float(steps_with_violation / total_steps) if total_steps > 0 else 0.0
+        system_violation_rate = float(steps_with_violation / total_steps) if total_steps > 0 else 0.0
+
         total_violation_magnitude = float(np.sum(self.violation_magnitudes))
+
+        # Rates per violation type (per intersection-step)
+        green_time_rate = float(self.violation_types.get("green_time", 0) / total_agent_steps)
+        phase_skip_rate = float(self.violation_types.get("phase_skip", 0) / total_agent_steps)
+        green_skip_rate = float(self.violation_types.get("green_skip", 0) / total_agent_steps)
 
         # 3. Fairness Metrics (Per intersection average delays)
         intersection_ids = list(self.delays[0].keys()) if self.delays else []
@@ -115,11 +143,17 @@ class MetricsCalculator:
             "avg_queue_length": avg_queue,
             "total_throughput": float(total_throughput),
             "avg_travel_time": avg_travel_time,
-            "constraint_violation_rate": violation_rate,
+            # Primary rate: Per-intersection violation rate (avoids 16-intersection saturation)
+            "constraint_violation_rate": per_int_violation_rate,
+            "per_intersection_violation_rate": per_int_violation_rate,
+            "system_violation_rate": system_violation_rate,
             "total_violation_magnitude": total_violation_magnitude,
             "green_time_violations": float(self.violation_types.get("green_time", 0)),
             "green_skip_violations": float(self.violation_types.get("green_skip", 0)),
             "phase_skip_violations": float(self.violation_types.get("phase_skip", 0)),
+            "green_time_rate": green_time_rate,
+            "phase_skip_rate": phase_skip_rate,
+            "green_skip_rate": green_skip_rate,
             "delay_variance": delay_variance,
             "max_intersection_delay": max_intersection_delay,
             "jains_fairness_index": jains_fairness,

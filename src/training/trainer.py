@@ -132,6 +132,7 @@ class Trainer:
                 step_throughput=info["step_throughput"],
                 step_violations=info["step_violations"],
                 step_violation_magnitude=info["step_violation_magnitude"],
+                step_violations_per_agent=info.get("step_violations_per_agent"),
             )
 
             if all(dones.values()):
@@ -178,6 +179,7 @@ class Trainer:
                 step_throughput=info["step_throughput"],
                 step_violations=info["step_violations"],
                 step_violation_magnitude=info["step_violation_magnitude"],
+                step_violations_per_agent=info.get("step_violations_per_agent"),
             )
 
             if all(dones.values()):
