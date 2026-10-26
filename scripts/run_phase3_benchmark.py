@@ -247,6 +247,8 @@ def main():
         num_intersections = cfg.num_intersections
         if args.num_seeds == parser.get_default("num_seeds"):
             num_seeds = cfg.num_seeds
+        if args.train_episodes == parser.get_default("train_episodes"):
+            train_episodes = cfg.train_episodes
         if args.max_steps == parser.get_default("max_steps"):
             max_steps = cfg.max_steps
 
