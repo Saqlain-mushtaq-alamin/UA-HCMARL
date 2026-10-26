@@ -180,7 +180,7 @@ def run_phase4_benchmark(
     if np.std(flat_sigmas) > 1e-6 and np.std(flat_budgets) > 1e-6:
         corr_b_sig = float(np.corrcoef(flat_sigmas, flat_budgets)[0, 1])
     else:
-        corr_b_sig = 0.85  # Default positive correlation
+        corr_b_sig = 0.0  # Zero correlation when variance is degenerate, no hardcoded default
 
     print(f"  * Correlation r(sigma_hat, B_allocated): {corr_b_sig:.3f} (Positive correlation: manager allocates higher budget to degraded sensors)")
 
