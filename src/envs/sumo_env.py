@@ -131,16 +131,23 @@ class SingleIntersectionSimulator:
                 self.current_phase = (self.current_phase + 1) % 4
                 self.time_in_phase = 0
             elif requested_phase != self.current_phase:
-                # 2. Min-green masking:
-                if self.time_in_phase < self.min_green:
+                # Valid transitions from current green: either intermediate yellow or conflicting green
+                valid_switch = (requested_phase == (self.current_phase + 1) % 4) or (requested_phase == (self.current_phase + 2) % 4)
+
+                if not valid_switch:
+                    # Invalid transition request (e.g. requesting N-S yellow while in E-W green)
+                    violations["phase_skip"] += 1
+                    violation_mag += 1.0
+                    self.time_in_phase += 1
+                elif self.time_in_phase < self.min_green:
+                    # Min-green masking: block early switch
                     violations["green_time"] += 1
                     violation_mag += (self.min_green - self.time_in_phase)
-                    # Block the switch — maintain green
                     self.time_in_phase += 1
                 else:
                     # Legitimate switch request:
-                    # Check for illegal yellow skip (e.g. requesting conflicting green directly)
-                    if requested_phase != self.current_phase + 1:
+                    # Check for illegal yellow skip (requesting conflicting green directly)
+                    if requested_phase == (self.current_phase + 2) % 4:
                         violations["phase_skip"] += 1
                     # Transition into yellow clearance phase
                     self.current_phase = (self.current_phase + 1) % 4
