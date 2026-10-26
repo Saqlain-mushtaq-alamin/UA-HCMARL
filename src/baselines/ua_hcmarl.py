@@ -271,8 +271,8 @@ class UAHCMARLController:
         actions = {}
         worker_input_dict = {}
 
-        # 1. Multi-Timescale Manager Budget Allocation every T_manager steps
-        if step_count % self.t_manager == 0 and step_count > 0:
+        # 1. Multi-Timescale Manager Budget Allocation every T_manager steps (when hierarchy enabled)
+        if self.enable_hierarchy and step_count % self.t_manager == 0 and step_count > 0:
             for r, aids in self.region_assignments.items():
                 reports = [self.latest_worker_reports.get(aid, {}) for aid in aids]
                 mgr_state = compute_manager_state(reports, total_budget=self.b_total_per_region)
@@ -303,16 +303,18 @@ class UAHCMARLController:
             self.bse.eval()
         self.worker_actor.eval()
 
+        default_b = self.b_total_per_region / self.num_workers_per_region
+
         with torch.no_grad():
             for aid in self.agent_ids:
                 raw_obs = obs_dict.get(aid, np.zeros(self.obs_dim, dtype=np.float32))
+                raw_budget = self.worker_budgets.get(aid, default_b) if self.enable_hierarchy else default_b
+                norm_budget = float(raw_budget / max(1e-3, default_b))
 
                 if self.bypass_bse:
-                    # A2 (No-Belief-State): skip BSE entirely, use raw noisy obs as worker input.
-                    # sigma_hat is unavailable — set to a neutral constant (1.0).
-                    worker_input = raw_obs.copy()
-                    sigma_hat_val = 1.0
-                    b_hat_np = raw_obs.copy()  # stored for consistency but not used by worker
+                    # A2 / A5 / A6: skip BSE entirely, use raw noisy obs
+                    b_hat_np = raw_obs.copy()
+                    sigma_hat_val = 0.0
                 else:
                     hist_t = self._get_history_tensor(aid, raw_obs)
                     prev_b = self.prev_beliefs.get(aid, None)
@@ -321,8 +323,10 @@ class UAHCMARLController:
                     self.prev_beliefs[aid] = b_hat_t.detach()
 
                     b_hat_np = b_hat_t.squeeze(0).cpu().numpy()
-                    sigma_hat_val = float(sigma_hat_t.item())
-                    worker_input = np.concatenate([b_hat_np, [sigma_hat_val]], axis=0)
+                    sigma_hat_val = float(sigma_hat_t.item()) if self.use_confidence_modulation else 0.0
+
+                # Worker input: [b_hat (16), sigma_hat (1), norm_budget (1)] = 18 dims
+                worker_input = np.concatenate([b_hat_np, [sigma_hat_val], [norm_budget]], axis=0).astype(np.float32)
 
                 # Store latest report for upward communication
                 self.latest_worker_reports[aid] = {
@@ -335,10 +339,23 @@ class UAHCMARLController:
                 worker_input_t = torch.tensor(worker_input, dtype=torch.float32, device=self.device).unsqueeze(0)
 
                 dist = self.worker_actor(worker_input_t)
+                logits = dist.logits.clone()
+
+                # Test-time active safety modulation:
+                # If confidence modulation is active, elevated uncertainty sigma_hat and constrained budget B_i
+                # dynamically modulate phase-switching propensity under noise.
+                if self.use_confidence_modulation and not self.disable_constraints:
+                    current_phase = int(raw_obs[8:12].argmax()) if len(raw_obs) >= 12 else 0
+                    uncertainty_penalty = sigma_hat_val * max(0.0, 1.5 - norm_budget)
+                    for a_idx in range(self.action_dim):
+                        if a_idx != current_phase:
+                            logits[0, a_idx] -= uncertainty_penalty * 2.0
+
                 if evaluate:
-                    act_t = torch.argmax(dist.logits, dim=-1)
+                    act_t = torch.argmax(logits, dim=-1)
                 else:
-                    act_t = dist.sample()
+                    policy_dist = torch.distributions.Categorical(logits=logits)
+                    act_t = policy_dist.sample()
 
                 act = int(act_t.item())
                 actions[aid] = act
@@ -349,11 +366,9 @@ class UAHCMARLController:
                     buf_next = self.worker_buffer["next_obs"][aid]
                     buf_obs  = self.worker_buffer["obs"][aid]
                     if len(buf_obs) > 0:
-                        # Overwrite the last placeholder with the real next obs
                         buf_next[-1] = raw_obs
-                    # Append current obs and a placeholder for its own next_obs
                     buf_obs.append(raw_obs)
-                    buf_next.append(raw_obs)  # placeholder; will be overwritten next step (or stays for last step)
+                    buf_next.append(raw_obs)
                     self.worker_buffer["b_hat"][aid].append(b_hat_np)
                     self.worker_buffer["sigma_hat"][aid].append(sigma_hat_val)
                     self.worker_buffer["worker_input"][aid].append(worker_input)
