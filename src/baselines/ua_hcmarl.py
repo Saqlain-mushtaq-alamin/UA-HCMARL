@@ -399,12 +399,13 @@ class UAHCMARLController:
                 self.worker_buffer["rewards"][aid].append(rewards[aid])
                 self.worker_buffer["dones"][aid].append(dones.get(aid, False))
 
-        # Accumulate manager rewards per region (sum of worker rewards in region)
-        for r, aids in self.region_assignments.items():
-            r_reward = float(np.mean([rewards.get(aid, 0.0) for aid in aids]))
-            # Only commit when the manager has recorded a state for this interval
-            if len(self.manager_buffer[r]["states"]) > len(self.manager_buffer[r].get("rewards", [])):
-                self.manager_buffer[r].setdefault("rewards", []).append(r_reward)
+        # Accumulate manager rewards per region (only when hierarchy is enabled)
+        if self.enable_hierarchy:
+            for r, aids in self.region_assignments.items():
+                r_reward = float(np.mean([rewards.get(aid, 0.0) for aid in aids]))
+                # Only commit when the manager has recorded a state for this interval
+                if len(self.manager_buffer[r]["states"]) > len(self.manager_buffer[r].get("rewards", [])):
+                    self.manager_buffer[r].setdefault("rewards", []).append(r_reward)
 
         # A4 ablation: disable_constraints=True skips the entire Lagrangian penalty
         # computation so net_rewards = env_rewards throughout training, isolating
