@@ -155,27 +155,34 @@ def run_phase5_ablation_benchmark(
         agent_ids=agent_ids, obs_dim=16, action_dim=4, t_manager=15,
         bypass_bse=False, enable_hierarchy=True, use_confidence_modulation=False, disable_constraints=True
     )
-    # A5: Flat-Constrained (MAPPO-LCE: flat worker with Lagrangian constraints)
+    # A5: Flat-Constrained (flat worker with Lagrangian constraints - Ablation of UAHCMARL class)
     a5_mappo_lce = UAHCMARLController(
         agent_ids=agent_ids, obs_dim=16, action_dim=4, t_manager=15,
         bypass_bse=True, enable_hierarchy=False, use_confidence_modulation=False, disable_constraints=False
     )
-    # A6: Flat-Unconstrained (MAPPO: flat unconstrained worker)
+    # A6: Flat-Unconstrained (flat unconstrained worker)
     a6_mappo = UAHCMARLController(
         agent_ids=agent_ids, obs_dim=16, action_dim=4, t_manager=15,
         bypass_bse=True, enable_hierarchy=False, use_confidence_modulation=False, disable_constraints=True
     )
+    # Control: A0 with constant sigma (fixed stickiness heuristic vs dynamic learned uncertainty)
+    a0_const_sigma = UAHCMARLController(
+        agent_ids=agent_ids, obs_dim=16, action_dim=4, t_manager=15,
+        bypass_bse=False, enable_hierarchy=True, use_confidence_modulation=True, disable_constraints=False,
+        uncertainty_penalty_mode="constant"
+    )
 
-    # Pretrain BSE for controllers that use it (A0, A1, A3, A4) with independent training seed
+    # Pretrain BSE for controllers that use it with independent training seed
     X_tr, Y_tr = collect_bse_dataset(env_train, num_steps=300, noise_scenarios=noise_scenarios, seed=42)
     train_bse_supervised(a0_full.bse, X_tr, Y_tr, epochs=3)
     train_bse_supervised(a1_no_hier.bse, X_tr, Y_tr, epochs=3)
     train_bse_supervised(a3_no_coupling.bse, X_tr, Y_tr, epochs=3)
     train_bse_supervised(a4_no_const.bse, X_tr, Y_tr, epochs=3)
+    train_bse_supervised(a0_const_sigma.bse, X_tr, Y_tr, epochs=3)
 
     train_curriculum_episodes = 5
     print(f"  -> Training ALL Ablation Controllers across {train_curriculum_episodes} Curriculum Episodes...")
-    for ctrl in [a0_full, a1_no_hier, a2_no_bse, a3_no_coupling, a4_no_const, a5_mappo_lce, a6_mappo]:
+    for ctrl in [a0_full, a1_no_hier, a2_no_bse, a3_no_coupling, a4_no_const, a5_mappo_lce, a6_mappo, a0_const_sigma]:
         for ep in range(train_curriculum_episodes):
             trainer.train_episode(ctrl, max_steps=max_steps, seed=42 + ep)
 
@@ -185,11 +192,12 @@ def run_phase5_ablation_benchmark(
     print("\n[Step 2/4] Evaluating Ablation Matrix across Noise Protocol...")
     ablations = {
         "A0: UA-HCMARL (Full)": a0_full,
+        "A0-Const-Sigma (Fixed Stickiness)": a0_const_sigma,
         "A1: No-Hierarchy": a1_no_hier,
         "A2: No-Belief-State": a2_no_bse,
         "A3: No-Coupling (Critical)": a3_no_coupling,
         "A4: No-Constraints (HCMARL)": a4_no_const,
-        "A5: MAPPO-LCE (SOTA)": a5_mappo_lce,
+        "A5: Flat-Constrained (Ablation)": a5_mappo_lce,
         "A6: MAPPO (Floor)": a6_mappo,
     }
 
