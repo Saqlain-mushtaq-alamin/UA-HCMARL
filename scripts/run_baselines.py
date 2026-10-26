@@ -30,31 +30,34 @@ def run_baseline_suite(
     net_file: str = "networks/grid4x4/grid4x4.net.xml",
     route_file: str = "networks/grid4x4/demand_uniform.rou.xml",
     num_intersections: int = 16,
-    num_seeds: int = 5,
-    max_steps: int = 100,
+    num_seeds: int = 10,
+    max_steps: int = 500,
     output_dir: str = "experiments/phase1_baselines",
 ):
     os.makedirs(output_dir, exist_ok=True)
     demand_profiles = ["uniform", "morning_peak", "evening_peak", "incident"]
     noise_scenarios = ["clean", "mild", "moderate", "severe", "extreme"]
+    agent_ids = [f"intersection_{i}" for i in range(num_intersections)]
 
     all_results = {}
 
     print("==================================================")
     print("      Phase 1: Baseline Evaluation Suite          ")
+    print(f"      (Seeds: {num_seeds}, Steps: {max_steps})     ")
     print("==================================================")
 
     for demand in demand_profiles:
         print(f"\n--- Testing Demand Profile: {demand} ---")
         demand_results = {}
 
-        for noise in noise_scenarios:
-            print(f"\n  [Noise Scenario: {noise.upper()}]")
+        for n_idx, noise in enumerate(noise_scenarios):
+            print(f"  [Noise: {noise.upper()}]")
             
             fixed_time_delays = []
             actuated_delays = []
 
             for seed in range(num_seeds):
+                env_seed = seed + n_idx * 10000
                 env = SUMOEnv(
                     net_file=net_file,
                     route_file=route_file,
@@ -62,25 +65,25 @@ def run_baseline_suite(
                     demand_profile=demand,
                     noise_scenario=noise,
                     max_steps=max_steps,
-                    seed=seed,
+                    seed=env_seed,
                 )
                 trainer = Trainer(env=env)
 
                 # 1. Fixed-Time (B1)
                 ft_ctrl = FixedTimeController()
-                ft_summary = trainer.run_evaluation_episode(ft_ctrl, max_steps=max_steps, seed=seed)
-                fixed_time_delays.append(ft_summary["avg_delay"])
+                ft_summary = trainer.run_evaluation_episode(ft_ctrl, max_steps=max_steps, seed=env_seed)
+                fixed_time_delays.append(ft_summary["avg_queue_length"])
 
                 # 2. Actuated (B2)
                 act_ctrl = ActuatedController()
-                act_summary = trainer.run_evaluation_episode(act_ctrl, max_steps=max_steps, seed=seed)
-                actuated_delays.append(act_summary["avg_delay"])
+                act_ctrl.reset(agent_ids)
+                act_summary = trainer.run_evaluation_episode(act_ctrl, max_steps=max_steps, seed=env_seed)
+                actuated_delays.append(act_summary["avg_queue_length"])
 
             ft_mean = float(np.mean(fixed_time_delays))
             act_mean = float(np.mean(actuated_delays))
 
-            print(f"    B1 (Fixed-Time) Mean Delay: {ft_mean:.2f} s")
-            print(f"    B2 (Actuated)   Mean Delay: {act_mean:.2f} s")
+            print(f"    Fixed-Time Mean Queue: {ft_mean:6.2f} veh | Actuated Mean Queue: {act_mean:6.2f} veh")
 
             demand_results[noise] = {
                 "fixed_time": fixed_time_delays,
