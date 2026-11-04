@@ -4,7 +4,7 @@ Actuated (SCATS-style) Baseline Controller (B2)
 Non-RL baseline controller dynamically extending green time based on real-time detector queue measurements.
 """
 
-from typing import Dict
+from typing import Dict, Optional, Any
 import numpy as np
 
 
@@ -20,12 +20,14 @@ class ActuatedController:
         min_green: int = 5,
         max_green: int = 50,
         yellow_duration: int = 3,
-        queue_threshold: float = 1.0,
+        queue_threshold: float = 1.5,
+        max_queue: float = 20.0,
     ):
         self.min_green = min_green
         self.max_green = max_green
         self.yellow_duration = yellow_duration
         self.queue_threshold = queue_threshold
+        self.max_queue = max_queue
 
         self.time_in_phase: Dict[str, int] = {}
         self.current_phase: Dict[str, int] = {}
@@ -39,8 +41,9 @@ class ActuatedController:
         cur_phase = self.current_phase.get(agent_id, 0)
         t_phase = self.time_in_phase.get(agent_id, 0)
 
-        # Parse queues from observation vector (queues on 4 approaches: N, S, E, W)
-        queues = obs[:4] if len(obs) >= 4 else np.zeros(4)
+        # Parse and un-normalize queues from observation vector (queues on 4 approaches: N, S, E, W)
+        # obs[:4] is normalized by max_queue (20.0) in SUMOEnv; convert back to actual vehicles.
+        queues = (obs[:4] * self.max_queue) if len(obs) >= 4 else np.zeros(4)
         ns_queue = queues[0] + queues[1]
         ew_queue = queues[2] + queues[3]
 
@@ -48,7 +51,7 @@ class ActuatedController:
 
         if cur_phase == 0:  # N-S Green
             if t_phase >= self.min_green:
-                # If N-S queue cleared or max green reached, switch to yellow
+                # If N-S queue cleared (< 1.5 veh), max green reached, or opposing queue significantly higher (+2.0 veh)
                 if ns_queue < self.queue_threshold or t_phase >= self.max_green or ew_queue > ns_queue + 2.0:
                     next_phase = 1
         elif cur_phase == 1:  # N-S Yellow
@@ -70,7 +73,13 @@ class ActuatedController:
 
         return next_phase
 
-    def select_actions(self, obs_dict: Dict[str, np.ndarray]) -> Dict[str, int]:
+    def select_actions(
+        self,
+        obs_dict: Dict[str, np.ndarray],
+        evaluate: bool = True,
+        step_count: int = 0,
+        action_masks: Optional[Dict[str, np.ndarray]] = None,
+    ) -> Dict[str, int]:
         actions = {}
         for agent_id, obs in obs_dict.items():
             actions[agent_id] = self.select_action(agent_id, obs)
