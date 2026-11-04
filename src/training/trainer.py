@@ -108,23 +108,30 @@ class Trainer:
         Runs a complete evaluation episode using given controller (baseline or RL policy).
         """
         self.metrics_calc.reset()
-        obs_dict, _ = self.env.reset(seed=seed)
+        obs_dict, reset_info = self.env.reset(seed=seed)
+        action_masks = reset_info.get("action_masks", None) if isinstance(reset_info, dict) else None
 
         for step in range(max_steps):
             if hasattr(controller, "select_actions"):
                 if hasattr(controller, "reset") and step == 0:
                     controller.reset(list(obs_dict.keys()))
                 try:
-                    actions = controller.select_actions(obs_dict, evaluate=True, step_count=step)
+                    actions = controller.select_actions(
+                        obs_dict, evaluate=True, step_count=step, action_masks=action_masks
+                    )
                 except TypeError:
                     try:
-                        actions = controller.select_actions(obs_dict, step_count=step)
+                        actions = controller.select_actions(obs_dict, evaluate=True, step_count=step)
                     except TypeError:
-                        actions = controller.select_actions(obs_dict)
+                        try:
+                            actions = controller.select_actions(obs_dict, step_count=step)
+                        except TypeError:
+                            actions = controller.select_actions(obs_dict)
             else:
                 actions = {aid: self.env.action_space.sample() for aid in obs_dict.keys()}
 
             obs_dict, rewards, dones, truncateds, info = self.env.step(actions)
+            action_masks = info.get("action_masks", None) if isinstance(info, dict) else None
 
             self.metrics_calc.record_step(
                 intersection_delays=info["step_delays"],
@@ -149,18 +156,25 @@ class Trainer:
         If a LearningCurveLogger is attached, records per-episode metrics automatically.
         """
         self.metrics_calc.reset()
-        obs_dict, _ = self.env.reset(seed=seed)
+        obs_dict, reset_info = self.env.reset(seed=seed)
+        action_masks = reset_info.get("action_masks", None) if isinstance(reset_info, dict) else None
 
         if hasattr(controller, "reset"):
             controller.reset(list(obs_dict.keys()))
 
         for step in range(max_steps):
             try:
-                actions = controller.select_actions(obs_dict, evaluate=False, step_count=step)
+                actions = controller.select_actions(
+                    obs_dict, evaluate=False, step_count=step, action_masks=action_masks
+                )
             except TypeError:
-                actions = controller.select_actions(obs_dict)
+                try:
+                    actions = controller.select_actions(obs_dict, evaluate=False, step_count=step)
+                except TypeError:
+                    actions = controller.select_actions(obs_dict)
 
             obs_dict, rewards, dones, truncateds, info = self.env.step(actions)
+            action_masks = info.get("action_masks", None) if isinstance(info, dict) else None
 
             # Store transition in controller buffer if supported
             if hasattr(controller, "store_transition"):
