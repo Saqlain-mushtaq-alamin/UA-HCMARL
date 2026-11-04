@@ -62,17 +62,22 @@ class SingleIntersectionSimulator:
         min_green: int = 5,
         max_green: int = 50,
         yellow_time: int = 3,
+        max_red_wait: int = 30,
         seed: Optional[int] = None,
     ):
         self.intersection_id = intersection_id
         self.min_green = min_green
         self.max_green = max_green
         self.yellow_time = yellow_time
+        self.max_red_wait = max_red_wait
 
         self.rng = np.random.default_rng(seed)
 
         # Queues for 4 approaches: North, South, East, West
         self.queues = np.zeros(4, dtype=np.float32)
+        # Approach red wait time counter (for max-wait / starvation constraint)
+        self.approach_red_wait = np.zeros(4, dtype=np.float32)
+        self.switch_attempt_blocked = False
         # Accumulated per-step wait (reset each step for step-wise reward)
         self._step_wait = np.zeros(4, dtype=np.float32)
 
@@ -82,6 +87,34 @@ class SingleIntersectionSimulator:
 
         # Arrival rate parameters (vehicles per second per approach)
         self.arrival_rates = np.array([0.2, 0.2, 0.15, 0.15], dtype=np.float32)
+
+    def get_action_mask(self) -> np.ndarray:
+        """
+        Returns binary mask of legal actions:
+        - In green phase before min_green: only current green is legal (cannot switch).
+        - In green phase after min_green: current green (hold), clearance yellow, or opposing green.
+        - In clearance yellow: clearance interval is non-preemptible (hold clearance).
+        """
+        mask = np.zeros(4, dtype=np.float32)
+        if self.current_phase == 0:  # N-S Green
+            if self.time_in_phase < self.min_green:
+                mask[0] = 1.0
+            else:
+                mask[0] = 1.0  # hold green
+                mask[1] = 1.0  # transition to yellow
+                mask[2] = 1.0  # switch to opposing green (auto-cleared via yellow)
+        elif self.current_phase == 1:  # N-S Yellow clearance
+            mask[1] = 1.0
+        elif self.current_phase == 2:  # E-W Green
+            if self.time_in_phase < self.min_green:
+                mask[2] = 1.0
+            else:
+                mask[2] = 1.0  # hold green
+                mask[3] = 1.0  # transition to yellow
+                mask[0] = 1.0  # switch to opposing green (auto-cleared via yellow)
+        elif self.current_phase == 3:  # E-W Yellow clearance
+            mask[3] = 1.0
+        return mask
 
     def set_demand_profile(self, profile: str):
         if profile == "morning_peak":
@@ -97,26 +130,16 @@ class SingleIntersectionSimulator:
         """
         Executes one step in the simulator.
         Returns: (state, info, throughput, violations, violation_magnitude)
-
-        Constraint enforcement (Bug 1.3 fix):
-        - MAX GREEN (hard): when time_in_phase >= max_green the simulator forces an
-          automatic phase advance regardless of the requested action.  This prevents RL
-          agents from locking into a single phase indefinitely.
-        - MIN GREEN (soft mask): when the agent requests a phase change before min_green
-          steps, the violation is counted (so the Lagrangian fires) but the requested
-          transition is BLOCKED — the current phase is maintained.  This removes the
-          incentive to issue rapid illegal phase flips for reward hacking.
         """
-        violations = {"green_time": 0, "green_skip": 0, "phase_skip": 0}
+        violations = {"green_time": 0, "green_skip": 0, "phase_skip": 0, "max_wait": 0}
         violation_mag = 0.0
 
         requested_phase = action
 
         # ── Yellow Phase Non-Preemptible Clearance ────────────────────────────
-        # Phases 1 and 3 are clearance intervals (Yellow).
-        # They MUST last exactly yellow_time seconds and cannot be held or skipped.
         if self.current_phase % 2 != 0:
             self.time_in_phase += 1
+            self.switch_attempt_blocked = False
             if self.time_in_phase >= self.yellow_time:
                 # Automatic transition to next green (1 -> 2 E-W Green, 3 -> 0 N-S Green)
                 self.current_phase = (self.current_phase + 1) % 4
@@ -130,30 +153,32 @@ class SingleIntersectionSimulator:
                 # Advance to clearance yellow
                 self.current_phase = (self.current_phase + 1) % 4
                 self.time_in_phase = 0
+                self.switch_attempt_blocked = False
             elif requested_phase != self.current_phase:
-                # Valid transitions from current green: either intermediate yellow or conflicting green
-                valid_switch = (requested_phase == (self.current_phase + 1) % 4) or (requested_phase == (self.current_phase + 2) % 4)
-
-                if not valid_switch:
-                    # Invalid transition request (e.g. requesting N-S yellow while in E-W green)
-                    violations["phase_skip"] += 1
-                    violation_mag += 1.0
-                    self.time_in_phase += 1
-                elif self.time_in_phase < self.min_green:
-                    # Min-green masking: block early switch
-                    violations["green_time"] += 1
-                    violation_mag += (self.min_green - self.time_in_phase)
+                # Early switch request before min_green
+                if self.time_in_phase < self.min_green:
+                    # Requirement 5: Block switch, but only count violation ONCE upon attempt initiation,
+                    # not repeatedly on every tick the request remains blocked.
+                    if not self.switch_attempt_blocked:
+                        violations["green_time"] += 1
+                        violation_mag += float(self.min_green - self.time_in_phase)
+                        self.switch_attempt_blocked = True
                     self.time_in_phase += 1
                 else:
-                    # Legitimate switch request:
-                    # Check for illegal yellow skip (requesting conflicting green directly)
-                    if requested_phase == (self.current_phase + 2) % 4:
+                    self.switch_attempt_blocked = False
+                    valid_switch = (requested_phase == (self.current_phase + 1) % 4) or (requested_phase == (self.current_phase + 2) % 4)
+                    if not valid_switch:
+                        # Invalid transition request
                         violations["phase_skip"] += 1
-                    # Transition into yellow clearance phase
-                    self.current_phase = (self.current_phase + 1) % 4
-                    self.time_in_phase = 0
+                        violation_mag += 1.0
+                        self.time_in_phase += 1
+                    else:
+                        # Legitimate transition into yellow clearance phase
+                        self.current_phase = (self.current_phase + 1) % 4
+                        self.time_in_phase = 0
             else:
                 # Maintained green within legal limits
+                self.switch_attempt_blocked = False
                 self.time_in_phase += 1
 
         # Vehicle arrivals (Poisson process)
@@ -174,6 +199,20 @@ class SingleIntersectionSimulator:
             discharged = min(self.queues[app], discharge_rate)
             self.queues[app] -= discharged
             step_throughput += float(discharged)
+
+        # Requirement 6: Max-wait / starvation constraint accounting
+        for app in range(4):
+            if app in active_approaches:
+                self.approach_red_wait[app] = 0.0
+            else:
+                if self.queues[app] > 0.0:
+                    self.approach_red_wait[app] += 1.0
+                else:
+                    self.approach_red_wait[app] = 0.0
+
+        if any(self.approach_red_wait[app] >= self.max_red_wait for app in range(4)):
+            violations["max_wait"] += 1
+            violation_mag += 1.0
 
         # avg_queue_length = total vehicles queued across all 4 approaches THIS step.
         # NOTE: units are VEHICLES, not seconds of travel-time delay.
@@ -294,6 +333,8 @@ class SUMOEnv(gym.Env):
         for i_idx, (i_id, sim) in enumerate(self.simulators.items()):
             sim.set_demand_profile(self.demand_profile)
             sim.queues = np.zeros(4, dtype=np.float32)
+            sim.approach_red_wait = np.zeros(4, dtype=np.float32)
+            sim.switch_attempt_blocked = False
             sim.current_phase = 0
             sim.time_in_phase = 0
 
@@ -304,7 +345,8 @@ class SUMOEnv(gym.Env):
             )
             obs_dict[i_id] = noisy_obs
 
-        return obs_dict, {"step": 0}
+        action_masks = {i_id: sim.get_action_mask() for i_id, sim in self.simulators.items()}
+        return obs_dict, {"step": 0, "action_masks": action_masks}
 
     def _get_clean_observation(self, agent_id: str) -> np.ndarray:
         return self.clean_obs_dict.get(agent_id, np.zeros(16, dtype=np.float32))
@@ -327,7 +369,7 @@ class SUMOEnv(gym.Env):
         step_queues = {}
         step_violations_per_agent = {}
         total_step_throughput = 0.0
-        total_step_violations = {"green_time": 0, "green_skip": 0, "phase_skip": 0}
+        total_step_violations = {"green_time": 0, "green_skip": 0, "phase_skip": 0, "max_wait": 0}
         total_violation_mag = 0.0
 
         for i_idx, (i_id, sim) in enumerate(self.simulators.items()):
@@ -356,6 +398,7 @@ class SUMOEnv(gym.Env):
                 total_step_violations[k] += v
             total_violation_mag += v_mag
 
+        action_masks = {i_id: sim.get_action_mask() for i_id, sim in self.simulators.items()}
         info_dict = {
             "step": self.step_count,
             "step_delays": step_delays,
@@ -364,6 +407,7 @@ class SUMOEnv(gym.Env):
             "step_violations": total_step_violations,
             "step_violations_per_agent": step_violations_per_agent,
             "step_violation_magnitude": total_violation_mag,
+            "action_masks": action_masks,
         }
 
         return obs_dict, rewards, dones, truncateds, info_dict
