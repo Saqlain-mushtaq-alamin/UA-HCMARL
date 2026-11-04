@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.distributions.categorical import Categorical
 
 from src.baselines.mappo import MAPPOActor, MAPPOCentralizedCritic
 from src.models.lagrangian import PIDLagrangianMultiplier
@@ -92,9 +93,12 @@ class MAPPOLCEController:
         self.reset_buffers()
 
     def reset(self, agent_ids=None):
-        """Reset Lagrangian state between episodes to prevent multiplier carry-over."""
-        self.pid_lagrangian.reset()
+        """Reset rollout buffers between episodes. Lagrangian multiplier state persists across episodes."""
         self.reset_buffers()
+
+    def reset_lagrangian(self):
+        """Explicitly reset Lagrangian multiplier state (only for full training restart)."""
+        self.pid_lagrangian.reset()
 
     def reset_buffers(self):
         self.buffer = {
@@ -117,7 +121,11 @@ class MAPPOLCEController:
         return np.concatenate(vecs, axis=0)
 
     def select_actions(
-        self, obs_dict: Dict[str, np.ndarray], evaluate: bool = False, step_count: int = 0
+        self,
+        obs_dict: Dict[str, np.ndarray],
+        evaluate: bool = False,
+        step_count: int = 0,
+        action_masks: Optional[Dict[str, np.ndarray]] = None,
     ) -> Dict[str, int]:
         actions = {}
         global_state = self._get_global_state(obs_dict)
@@ -132,10 +140,20 @@ class MAPPOLCEController:
                 obs_arr = np.array(obs_list, dtype=np.float32)
                 obs_t = torch.from_numpy(obs_arr).to(self.device)
                 self.shared_actor.eval()
-                dist = self.shared_actor(obs_t)
+                logits = self.shared_actor.net(obs_t)
+
+                if action_masks is not None:
+                    masks_list = [
+                        action_masks.get(aid, np.ones(self.action_dim, dtype=np.float32))
+                        for aid in self.agent_ids
+                    ]
+                    mask_t = torch.tensor(np.array(masks_list), dtype=torch.float32, device=self.device)
+                    logits = torch.where(mask_t > 0.0, logits, torch.tensor(-1e9, device=self.device))
+
+                dist = Categorical(logits=logits)
 
                 if evaluate:
-                    act_t = torch.argmax(dist.logits, dim=-1)
+                    act_t = torch.argmax(logits, dim=-1)
                     acts = act_t.cpu().numpy()
                     for idx, aid in enumerate(self.agent_ids):
                         actions[aid] = int(acts[idx])
@@ -157,10 +175,16 @@ class MAPPOLCEController:
 
                     actor = self.actors[aid]
                     actor.eval()
-                    dist = actor(obs_t)
+                    logits = actor.net(obs_t)
+
+                    if action_masks is not None and aid in action_masks:
+                        mask_t = torch.tensor(action_masks[aid], dtype=torch.float32, device=self.device).unsqueeze(0)
+                        logits = torch.where(mask_t > 0.0, logits, torch.tensor(-1e9, device=self.device))
+
+                    dist = Categorical(logits=logits)
 
                     if evaluate:
-                        act_t = torch.argmax(dist.logits, dim=-1)
+                        act_t = torch.argmax(logits, dim=-1)
                         log_prob_t = torch.zeros(1, device=self.device)
                     else:
                         act_t = dist.sample()
@@ -244,28 +268,16 @@ class MAPPOLCEController:
         num_steps = len(rewards)
 
         # Aggregate step costs and update PID-Lagrangian multipliers
-        # Costs are counts per step (violations), which can be 0–N per step.
-        # Normalize by num_agents and num_constraints to get a rate-like quantity.
-        normalization = max(1.0, float(self.num_agents * self.num_constraints))
-        mean_costs_norm = (np.mean(costs, axis=0) / normalization) if num_steps > 0 else np.zeros(self.num_constraints)
+        # Normalize costs by num_agents to obtain the average violation rate per agent-step
+        mean_costs_rate = (np.mean(costs, axis=0) / float(self.num_agents)) if num_steps > 0 else np.zeros(self.num_constraints)
         lambdas = self.pid_lagrangian.update(
-            constraint_costs=mean_costs_norm,
-            constraint_limits=self.constraint_limits / normalization,
+            constraint_costs=mean_costs_rate,
+            constraint_limits=self.constraint_limits,
         )
 
-        total_lambda = float(np.sum(lambdas))
-        total_costs_raw = np.sum(costs, axis=-1)  # scalar raw cost per step
-
-        # FIX: Hard cap penalty at 20% of mean absolute reward magnitude per step.
-        # This ensures the Lagrangian term is a guidance signal, not a dominant loss.
-        mean_abs_reward = float(np.mean(np.abs(rewards))) + 1e-6
-        mean_raw_cost = float(np.mean(np.abs(total_costs_raw))) + 1e-6
-        # penalty_scale: how much to scale total_lambda * cost to fit target budget
-        target_penalty_budget = 0.20 * mean_abs_reward  # 20% of reward magnitude
-        penalty_scale = min(1.0, target_penalty_budget / (total_lambda * mean_raw_cost + 1e-6))
-
-        # Penalized combined reward (bounded)
-        penalized_rewards = rewards - penalty_scale * total_lambda * total_costs_raw
+        total_costs_raw = np.sum(costs, axis=-1)
+        # Requirement 4: Direct Lagrangian penalty without artificial 20% cap
+        penalized_rewards = rewards - np.sum((costs / float(self.num_agents)) * lambdas, axis=-1)
 
         # Compute GAE on Penalized Rewards
         advantages = np.zeros_like(penalized_rewards, dtype=np.float32)
