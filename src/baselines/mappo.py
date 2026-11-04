@@ -136,7 +136,11 @@ class MAPPOController:
         return np.concatenate(vecs, axis=0)
 
     def select_actions(
-        self, obs_dict: Dict[str, np.ndarray], evaluate: bool = False, step_count: int = 0
+        self,
+        obs_dict: Dict[str, np.ndarray],
+        evaluate: bool = False,
+        step_count: int = 0,
+        action_masks: Optional[Dict[str, np.ndarray]] = None,
     ) -> Dict[str, int]:
         actions = {}
         global_state = self._get_global_state(obs_dict)
@@ -150,10 +154,20 @@ class MAPPOController:
                 obs_arr = np.array(obs_list, dtype=np.float32)
                 obs_t = torch.from_numpy(obs_arr).to(self.device)
                 self.shared_actor.eval()
-                dist = self.shared_actor(obs_t)
+                logits = self.shared_actor.net(obs_t)
+
+                if action_masks is not None:
+                    masks_list = [
+                        action_masks.get(aid, np.ones(self.action_dim, dtype=np.float32))
+                        for aid in self.agent_ids
+                    ]
+                    mask_t = torch.tensor(np.array(masks_list), dtype=torch.float32, device=self.device)
+                    logits = torch.where(mask_t > 0.0, logits, torch.tensor(-1e9, device=self.device))
+
+                dist = Categorical(logits=logits)
 
                 if evaluate:
-                    act_t = torch.argmax(dist.logits, dim=-1)
+                    act_t = torch.argmax(logits, dim=-1)
                     acts = act_t.cpu().numpy()
                     for idx, aid in enumerate(self.agent_ids):
                         actions[aid] = int(acts[idx])
@@ -175,10 +189,16 @@ class MAPPOController:
 
                     actor = self.actors[aid]
                     actor.eval()
-                    dist = actor(obs_t)
+                    logits = actor.net(obs_t)
+
+                    if action_masks is not None and aid in action_masks:
+                        mask_t = torch.tensor(action_masks[aid], dtype=torch.float32, device=self.device).unsqueeze(0)
+                        logits = torch.where(mask_t > 0.0, logits, torch.tensor(-1e9, device=self.device))
+
+                    dist = Categorical(logits=logits)
 
                     if evaluate:
-                        act_t = torch.argmax(dist.logits, dim=-1)
+                        act_t = torch.argmax(logits, dim=-1)
                         log_prob_t = torch.zeros(1, device=self.device)
                     else:
                         act_t = dist.sample()
