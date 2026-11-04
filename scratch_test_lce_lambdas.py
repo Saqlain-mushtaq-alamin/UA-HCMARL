@@ -15,3 +15,4 @@ for ep in range(5):
           f"l_green={loss.get('lambda_green', 0.0):.6f}, "
           f"l_gskip={loss.get('lambda_gskip', 0.0):.6f}, "
           f"l_pskip={loss.get('lambda_pskip', 0.0):.6f}")
+

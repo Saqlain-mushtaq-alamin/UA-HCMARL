@@ -51,3 +51,4 @@ for thresh in [1.0, 2.0, 3.0, 5.0]:
     ctrl_fix.reset(agent_ids)
     res_fix = trainer.run_evaluation_episode(ctrl_fix, max_steps=500, seed=42)
     print(f"Fixed Actuated (threshold={thresh} veh): queue={res_fix['avg_queue_length']:.2f}, switches={ctrl_fix.min_green}")
+

@@ -36,3 +36,4 @@ for name, ctrl_factory, path in configs:
     q_blind = res_blind["avg_queue_length"]
     v_blind = res_blind["constraint_violation_rate"] * 100
     print(f"{name:10s} | Normal: Queue={q_norm:6.2f}, Viol={v_norm:5.1f}% | Blind: Queue={q_blind:6.2f}, Viol={v_blind:5.1f}%")
+
