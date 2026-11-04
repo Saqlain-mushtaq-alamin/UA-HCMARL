@@ -62,7 +62,7 @@ class SingleIntersectionSimulator:
         min_green: int = 5,
         max_green: int = 50,
         yellow_time: int = 3,
-        max_red_wait: int = 30,
+        max_red_wait: int = 45,
         seed: Optional[int] = None,
     ):
         self.intersection_id = intersection_id

@@ -169,7 +169,11 @@ class FMA2CController:
         return np.concatenate(vecs, axis=0) if vecs else np.zeros(self.obs_dim, dtype=np.float32)
 
     def select_actions(
-        self, obs_dict: Dict[str, np.ndarray], evaluate: bool = False, step_count: int = 0
+        self,
+        obs_dict: Dict[str, np.ndarray],
+        evaluate: bool = False,
+        step_count: int = 0,
+        action_masks: Optional[Dict[str, np.ndarray]] = None,
     ) -> Dict[str, int]:
         actions = {}
 
@@ -208,6 +212,15 @@ class FMA2CController:
             w_in_arr = np.array(worker_inputs, dtype=np.float32)
             w_in_t = torch.from_numpy(w_in_arr).to(self.device)
             dist, val_t = self.worker(w_in_t)
+
+            if action_masks is not None:
+                masks_list = [
+                    action_masks.get(aid, np.ones(self.action_dim, dtype=np.float32))
+                    for aid in self.agent_ids
+                ]
+                mask_t = torch.tensor(np.array(masks_list), dtype=torch.float32, device=self.device)
+                logits = torch.where(mask_t > 0.0, dist.logits, torch.tensor(-1e9, device=self.device))
+                dist = Categorical(logits=logits)
 
             if evaluate:
                 act_t = torch.argmax(dist.logits, dim=-1)
