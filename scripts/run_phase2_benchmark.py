@@ -372,14 +372,34 @@ def run_phase2_benchmark(
     # 4. Statistical Report using Independent Training Seeds as Replicates
     # ------------------------------------------------------------------
     print("\n[Step 3/3] Generating Statistical Significance & Robustness Reports...")
+    # Group evaluations by training seed so that the training seed is the replicate unit
     clean_queues = {m: benchmark_results["clean"][m]["avg_delay"] for m in all_methods}
-    stat_report = generate_statistical_report(clean_queues, baseline_name="Fixed-Time")
+    clean_replicates = {}
+    for m_name in all_methods:
+        raw_delays = clean_queues.get(m_name, [])
+        if len(raw_delays) == 0:
+            clean_replicates[m_name] = []
+        elif len(raw_delays) == len(train_seeds):
+            clean_replicates[m_name] = raw_delays
+        elif len(raw_delays) > len(train_seeds):
+            reps = []
+            for s_idx in range(len(train_seeds)):
+                rep_indices = [i for i in range(len(raw_delays)) if i % len(train_seeds) == s_idx]
+                reps.append(float(np.mean([raw_delays[i] for i in rep_indices])))
+            clean_replicates[m_name] = reps
+        else:
+            clean_replicates[m_name] = raw_delays
 
-    fixed_arr = np.array(clean_queues["Fixed-Time"])
+    stat_report = generate_statistical_report(clean_replicates, baseline_name="Fixed-Time")
+    for m_name in all_methods:
+        if m_name in stat_report:
+            stat_report[m_name]["eval_seeds_raw"] = clean_queues.get(m_name, [])
+
+    fixed_arr = np.array(clean_replicates["Fixed-Time"])
     for m_name in all_methods:
         if m_name == "Fixed-Time":
             continue
-        m_arr = np.array(clean_queues[m_name])
+        m_arr = np.array(clean_replicates[m_name])
         ttest_result = ttest_paired(m_arr, fixed_arr)
         if m_name in stat_report and "vs_baseline" in stat_report[m_name]:
             stat_report[m_name]["vs_baseline"]["ttest_p_value"] = ttest_result["p_value"]
