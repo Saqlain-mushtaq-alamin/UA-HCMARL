@@ -3,7 +3,7 @@ MAPPO-LCE Baseline (B5) (Phase 2 §2.3)
 
 MAPPO with PID-Lagrangian Cost Estimator (LCE).
 Features:
-- Extends MAPPO with 3 safety constraint penalties (GreenTime, GreenSkip, PhaseSkip).
+- Extends MAPPO with 4 safety constraint penalties (GreenTime, GreenSkip, PhaseSkip, Starvation/MaxWait).
 - Dynamically updates Lagrangian multipliers via PID controller.
 - Modifies advantages / rewards using constraint costs to guide policy optimization under constraints.
 """
