@@ -28,7 +28,7 @@ def test_training_starvation():
     # Load mappo_s44
     ckpt = torch.load("experiments/phase2_flat_baselines/models/mappo_s44.pt", weights_only=False)
     ctrl.shared_actor.load_state_dict(ckpt["shared_actor"])
-    ctrl.cost_critic.load_state_dict(ckpt["reward_critic"]) # initialize critic
+    ctrl.cost_critic.load_state_dict(ckpt["critic"]) # initialize critic
     
     # Inject transitions that mirror the greedy evaluation where starvation happens
     trainer = Trainer(env=env)
