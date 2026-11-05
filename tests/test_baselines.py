@@ -6,6 +6,7 @@ import pytest
 import numpy as np
 from src.baselines.fixed_time import FixedTimeController
 from src.baselines.actuated import ActuatedController
+from src.baselines.max_pressure import MaxPressureController
 from src.baselines.ippo import IPPOController
 from src.baselines.mappo import MAPPOController
 from src.baselines.mappo_lce import MAPPOLCEController
@@ -31,6 +32,18 @@ def test_actuated_controller():
     obs = np.array([5.0, 5.0, 0.0, 0.0] + [0.0] * 12, dtype=np.float32)
     action = ctrl.select_action("intersection_0", obs)
     assert action in [0, 1, 2, 3]
+
+
+def test_max_pressure_controller():
+    ctrl = MaxPressureController(min_green=5, max_green=20, yellow_duration=3)
+    ctrl.reset(["intersection_0"])
+
+    # High pressure on E-W (queues 10.0, 10.0) vs N-S (0.0, 0.0)
+    # obs normalized by max_queue=20: 0.0, 0.0, 0.5, 0.5
+    obs = np.array([0.0, 0.0, 0.5, 0.5] + [0.0] * 12, dtype=np.float32)
+    ctrl.time_in_phase["intersection_0"] = 10  # >= min_green
+    action = ctrl.select_action("intersection_0", obs)
+    assert action == 1  # Should switch to N-S yellow to transition to high-pressure E-W
 
 
 def test_baselines_in_env():

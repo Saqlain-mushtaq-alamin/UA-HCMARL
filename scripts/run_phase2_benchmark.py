@@ -415,12 +415,14 @@ def run_phase2_benchmark(
         if m_name == "Fixed-Time":
             continue
         vs = stat_report.get(m_name, {}).get("vs_baseline", {})
-        w_p = vs.get("p_value", 1.0)
+        w_p = vs.get("wilcoxon_p_value", 1.0)
         t_p = vs.get("ttest_p_value", 1.0)
         d   = vs.get("cohens_d", 0.0)
-        sig_w = "[Y]" if vs.get("significant_p_lt_005") else "[N]"
+        ci_l = stat_report.get(m_name, {}).get("ci_95_low", 0.0)
+        ci_h = stat_report.get(m_name, {}).get("ci_95_high", 0.0)
         sig_t = "[Y]" if vs.get("ttest_significant") else "[N]"
-        print(f"  {m_name:12s}: Wilcoxon p={w_p:.4f} {sig_w} | t-test p={t_p:.4f} {sig_t} | d={d:.2f}")
+        sig_w = "[Y]" if vs.get("significant_p_lt_005") else "[N]"
+        print(f"  {m_name:12s}: Paired t-test p={t_p:.4f} {sig_t} | Wilcoxon p={w_p:.4f} {sig_w} | d={d:.2f} | 95% CI: [{ci_l:.2f}, {ci_h:.2f}]")
 
     # ------------------------------------------------------------------
     # 5. Robustness Degradation Slopes
