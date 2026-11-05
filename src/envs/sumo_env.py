@@ -62,7 +62,7 @@ class SingleIntersectionSimulator:
         min_green: int = 5,
         max_green: int = 50,
         yellow_time: int = 3,
-        max_red_wait: int = 45,
+        max_red_wait: int = 38,
         seed: Optional[int] = None,
     ):
         self.intersection_id = intersection_id
@@ -274,6 +274,7 @@ class SUMOEnv(gym.Env):
         step_length: float = 1.0,
         max_steps: int = 3600,
         seed: Optional[int] = None,
+        max_red_wait: int = 38,
     ):
         super().__init__()
         self.net_file = net_file
@@ -284,6 +285,7 @@ class SUMOEnv(gym.Env):
         self.use_gui = use_gui
         self.step_length = step_length
         self.max_steps = max_steps
+        self.max_red_wait = max_red_wait
         self.step_count = 0
         self._init_seed = seed
 
@@ -299,6 +301,7 @@ class SUMOEnv(gym.Env):
         self.simulators = {
             i_id: SingleIntersectionSimulator(
                 intersection_id=i_id,
+                max_red_wait=self.max_red_wait,
                 seed=(seed * 31 + i + 7919) if seed is not None else None
             )
             for i, i_id in enumerate(self.intersection_ids)

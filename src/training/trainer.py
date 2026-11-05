@@ -65,6 +65,11 @@ class LearningCurveLogger:
         self._curves["entropy_loss"].append(float(loss_info.get("entropy_loss", float("nan"))))
         self._curves["worker_loss"].append(float(loss_info.get("worker_loss", float("nan"))))
         self._curves["manager_loss"].append(float(loss_info.get("manager_loss", float("nan"))))
+        for k in ["lambda_green", "lambda_gskip", "lambda_pskip", "lambda_starve"]:
+            if k in loss_info:
+                if k not in self._curves:
+                    self._curves[k] = []
+                self._curves[k].append(float(loss_info[k]))
 
     def get(self) -> Dict[str, List[float]]:
         return dict(self._curves)

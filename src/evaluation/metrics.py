@@ -115,6 +115,7 @@ class MetricsCalculator:
         green_time_rate = float(self.violation_types.get("green_time", 0) / total_agent_steps)
         phase_skip_rate = float(self.violation_types.get("phase_skip", 0) / total_agent_steps)
         green_skip_rate = float(self.violation_types.get("green_skip", 0) / total_agent_steps)
+        max_wait_rate = float(self.violation_types.get("max_wait", 0) / total_agent_steps)
 
         # 3. Fairness Metrics (Per intersection average delays)
         intersection_ids = list(self.delays[0].keys()) if self.delays else []
@@ -151,9 +152,11 @@ class MetricsCalculator:
             "green_time_violations": float(self.violation_types.get("green_time", 0)),
             "green_skip_violations": float(self.violation_types.get("green_skip", 0)),
             "phase_skip_violations": float(self.violation_types.get("phase_skip", 0)),
+            "max_wait_violations": float(self.violation_types.get("max_wait", 0)),
             "green_time_rate": green_time_rate,
             "phase_skip_rate": phase_skip_rate,
             "green_skip_rate": green_skip_rate,
+            "max_wait_rate": max_wait_rate,
             "delay_variance": delay_variance,
             "max_intersection_delay": max_intersection_delay,
             "jains_fairness_index": jains_fairness,
