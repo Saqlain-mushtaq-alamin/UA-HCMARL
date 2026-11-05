@@ -75,16 +75,16 @@ def test_3_mappo_lce_multiplier_persistence():
     agent_ids = [f"intersection_{i}" for i in range(4)]
     ctrl = MAPPOLCEController(agent_ids=agent_ids, obs_dim=16, action_dim=4)
 
-    # Set initial non-zero lambdas
-    ctrl.pid_lagrangian.lambdas[:] = np.array([0.25, 0.15, 0.35], dtype=np.float32)
-    ctrl.pid_lagrangian.integral_errors[:] = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    # Set initial non-zero lambdas (4 constraints: green_time, green_skip, phase_skip, starvation)
+    ctrl.pid_lagrangian.lambdas[:] = np.array([0.25, 0.15, 0.35, 0.45], dtype=np.float32)
+    ctrl.pid_lagrangian.integral_errors[:] = np.array([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
 
     # Calling reset() between episodes
     ctrl.reset(agent_ids)
 
     # Assert multipliers and integrals were NOT wiped
-    assert np.allclose(ctrl.pid_lagrangian.lambdas, [0.25, 0.15, 0.35]), "Multipliers must persist across episodes"
-    assert np.allclose(ctrl.pid_lagrangian.integral_errors, [1.0, 2.0, 3.0]), "Integral errors must persist across episodes"
+    assert np.allclose(ctrl.pid_lagrangian.lambdas, [0.25, 0.15, 0.35, 0.45]), "Multipliers must persist across episodes"
+    assert np.allclose(ctrl.pid_lagrangian.integral_errors, [1.0, 2.0, 3.0, 4.0]), "Integral errors must persist across episodes"
 
 
 def test_4_lagrangian_uncapped_penalty():
@@ -93,7 +93,7 @@ def test_4_lagrangian_uncapped_penalty():
     ctrl = MAPPOLCEController(agent_ids=agent_ids, obs_dim=16, action_dim=4)
 
     # Set positive multiplier
-    ctrl.pid_lagrangian.lambdas[:] = np.array([2.0, 2.0, 2.0], dtype=np.float32)
+    ctrl.pid_lagrangian.lambdas[:] = np.array([2.0, 2.0, 2.0, 2.0], dtype=np.float32)
 
     obs_dict = {aid: np.zeros(16, dtype=np.float32) for aid in agent_ids}
     ctrl.select_actions(obs_dict, evaluate=False, step_count=0)
