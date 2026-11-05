@@ -29,7 +29,7 @@ def run_diagnostic():
 
     # 1. Fixed-Time Evaluation
     env_ft = SUMOEnv(num_intersections=num_intersections, max_steps=max_steps, max_red_wait=38, seed=seed)
-    ctrl_ft = FixedTimeController(cycle_length=60, min_green=5, yellow_time=3)
+    ctrl_ft = FixedTimeController(green_duration=30, yellow_duration=3)
     trainer_ft = Trainer(env=env_ft)
     ft_summary = trainer_ft.run_evaluation_episode(ctrl_ft, max_steps=max_steps, seed=seed)
     ft_starve_rate = ft_summary.get("max_wait_rate", 0.0)
