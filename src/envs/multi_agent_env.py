@@ -28,9 +28,11 @@ class MARLTSCParallelEnv(ParallelEnv):
         noise_scenario: str = "clean",
         max_steps: int = 3600,
         seed: Optional[int] = None,
+        max_red_wait: int = 38,
     ):
         super().__init__()
         self.num_intersections = num_intersections
+        self.max_red_wait = max_red_wait
         self.possible_agents = [f"intersection_{i}" for i in range(num_intersections)]
         self.agents = list(self.possible_agents)
 
@@ -42,6 +44,7 @@ class MARLTSCParallelEnv(ParallelEnv):
             noise_scenario=noise_scenario,
             max_steps=max_steps,
             seed=seed,
+            max_red_wait=max_red_wait,
         )
 
         self._observation_spaces = {
