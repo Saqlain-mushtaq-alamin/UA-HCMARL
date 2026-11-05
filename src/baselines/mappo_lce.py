@@ -30,7 +30,7 @@ class MAPPOLCEController:
         obs_dim: int = 16,
         action_dim: int = 4,
         share_actor: bool = True,
-        num_constraints: int = 3,
+        num_constraints: int = 4,
         constraint_limits: Optional[List[float]] = None,
         lr: float = 3e-4,
         gamma: float = 0.99,
@@ -38,9 +38,9 @@ class MAPPOLCEController:
         clip_eps: float = 0.2,
         entropy_coef: float = 0.01,
         value_coef: float = 0.5,
-        kp: float = 0.05,
-        ki: float = 0.005,
-        kd: float = 0.01,
+        kp: float = 0.01,
+        ki: float = 0.001,
+        kd: float = 0.001,
         device: str = "cpu",
     ):
         self.agent_ids = agent_ids
@@ -57,14 +57,15 @@ class MAPPOLCEController:
         self.device = torch.device(device)
 
         self.num_constraints = num_constraints
-        # FIX: Raise constraint limits so early training isn't crushed by penalties.
-        # 0.3 = allow 30% violation rate before Lagrangian activates.  Once the
-        # policy learns basic traffic management, tighten these to 0.1 in later phases.
-        self.constraint_limits = (
-            np.array(constraint_limits, dtype=np.float32)
-            if constraint_limits is not None
-            else np.array([0.3, 0.3, 0.3], dtype=np.float32)
-        )
+        if constraint_limits is not None:
+            self.constraint_limits = np.array(constraint_limits, dtype=np.float32)
+            self.num_constraints = len(self.constraint_limits)
+        else:
+            self.constraint_limits = (
+                np.array([0.3, 0.3, 0.3, 0.01], dtype=np.float32)
+                if num_constraints == 4
+                else np.full(num_constraints, 0.3, dtype=np.float32)
+            )
 
         # PID-Lagrangian multiplier manager
         self.pid_lagrangian = PIDLagrangianMultiplier(
@@ -215,6 +216,8 @@ class MAPPOLCEController:
             "reward_critic": self.reward_critic.state_dict(),
             "cost_critic": self.cost_critic.state_dict(),
             "pid_lambdas": self.pid_lagrangian.lambdas if hasattr(self, "pid_lagrangian") else None,
+            "pid_integral_errors": self.pid_lagrangian.integral_errors if hasattr(self, "pid_lagrangian") else None,
+            "pid_prev_errors": self.pid_lagrangian.prev_errors if hasattr(self, "pid_lagrangian") else None,
         }
         torch.save(data, path)
 
@@ -231,7 +234,20 @@ class MAPPOLCEController:
         if "cost_critic" in checkpoint:
             self.cost_critic.load_state_dict(checkpoint["cost_critic"])
         if "pid_lambdas" in checkpoint and checkpoint["pid_lambdas"] is not None and hasattr(self, "pid_lagrangian"):
-            self.pid_lagrangian.lambdas = checkpoint["pid_lambdas"]
+            saved_lambdas = checkpoint["pid_lambdas"]
+            if len(saved_lambdas) == len(self.pid_lagrangian.lambdas):
+                self.pid_lagrangian.lambdas = np.copy(saved_lambdas)
+            else:
+                n = min(len(saved_lambdas), len(self.pid_lagrangian.lambdas))
+                self.pid_lagrangian.lambdas[:n] = saved_lambdas[:n]
+        if "pid_integral_errors" in checkpoint and checkpoint["pid_integral_errors"] is not None and hasattr(self, "pid_lagrangian"):
+            saved_ie = checkpoint["pid_integral_errors"]
+            if len(saved_ie) == len(self.pid_lagrangian.integral_errors):
+                self.pid_lagrangian.integral_errors = np.copy(saved_ie)
+        if "pid_prev_errors" in checkpoint and checkpoint["pid_prev_errors"] is not None and hasattr(self, "pid_lagrangian"):
+            saved_pe = checkpoint["pid_prev_errors"]
+            if len(saved_pe) == len(self.pid_lagrangian.prev_errors):
+                self.pid_lagrangian.prev_errors = np.copy(saved_pe)
 
     def store_transition(
         self,
@@ -245,8 +261,9 @@ class MAPPOLCEController:
         c_green = float(step_violations.get("green_time", 0)) if step_violations else 0.0
         c_gskip = float(step_violations.get("green_skip", 0)) if step_violations else 0.0
         c_pskip = float(step_violations.get("phase_skip", 0)) if step_violations else 0.0
+        c_starve = float(step_violations.get("max_wait", 0)) if step_violations else 0.0
 
-        step_costs = np.array([c_green, c_gskip, c_pskip], dtype=np.float32)
+        step_costs = np.array([c_green, c_gskip, c_pskip, c_starve], dtype=np.float32)
 
         self.buffer["rewards"].append(team_reward)
         self.buffer["costs"].append(step_costs)
