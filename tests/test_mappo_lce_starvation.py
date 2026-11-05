@@ -179,3 +179,4 @@ def test_sumo_env_starvation_signal_pipeline():
     assert info["step_violations"]["max_wait"] >= 1, "max_wait violation must propagate to env info"
     assert "step_violations_per_agent" in info
     assert info["step_violations_per_agent"]["intersection_0"]["max_wait"] >= 1
+

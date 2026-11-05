@@ -46,3 +46,4 @@ def test_greedy_shift():
 
 if __name__ == "__main__":
     test_greedy_shift()
+
