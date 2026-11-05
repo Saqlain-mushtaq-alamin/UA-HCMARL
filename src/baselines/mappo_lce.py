@@ -382,4 +382,5 @@ class MAPPOLCEController:
             "lambda_green": float(lambdas[0]),
             "lambda_gskip": float(lambdas[1]),
             "lambda_pskip": float(lambdas[2]),
+            "lambda_starve": float(lambdas[3]) if len(lambdas) > 3 else 0.0,
         }
