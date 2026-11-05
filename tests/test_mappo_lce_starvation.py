@@ -161,6 +161,29 @@ def test_mappo_lce_checkpoint_serialization_and_restoration(tmp_path):
     assert np.allclose(ctrl2.pid_lagrangian.prev_errors, test_pe), "Restored prev errors must match"
 
 
+def test_mappo_lce_legacy_3d_checkpoint_backward_compatibility(tmp_path):
+    """Verify loading an older 3-dimensional checkpoint does not crash or corrupt 4D controller."""
+    agent_ids = ["int_0", "int_1"]
+    ckpt_path = os.path.join(tmp_path, "legacy_3d.pt")
+
+    # Save a legacy checkpoint with only 3 constraints
+    legacy_data = {
+        "share_actor": True,
+        "shared_actor": None,
+        "actors": None,
+        "pid_lambdas": np.array([0.11, 0.22, 0.33], dtype=np.float32),
+    }
+    torch.save(legacy_data, ckpt_path)
+
+    ctrl = MAPPOLCEController(agent_ids=agent_ids, obs_dim=16, action_dim=4, num_constraints=4)
+    ctrl.load_model(ckpt_path)
+
+    # First 3 lambdas restored; 4th (starvation) remains 0.0
+    assert np.allclose(ctrl.pid_lagrangian.lambdas[:3], [0.11, 0.22, 0.33])
+    assert ctrl.pid_lagrangian.lambdas[3] == 0.0
+    assert ctrl.num_constraints == 4
+
+
 def test_sumo_env_starvation_signal_pipeline():
     """Verify SingleIntersectionSimulator and SUMOEnv correctly track and propagate max_wait."""
     env = SUMOEnv(num_intersections=2, max_steps=100, max_red_wait=38, seed=42)
