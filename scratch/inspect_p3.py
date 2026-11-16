@@ -17,3 +17,4 @@ for sc in ['clean', 'mild', 'moderate', 'severe', 'extreme']:
         reps = [round(x, 2) for x in q['replicate_means']]
         print(f"{m:26s}: Mean = {q['mean']:6.2f} +/- {q['std']:5.2f} | Replicates: {reps}")
     print()
+
