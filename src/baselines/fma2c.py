@@ -148,6 +148,15 @@ class FMA2CController:
 
         self.reset_buffers()
 
+    def reset(self, agent_ids: Optional[List[str]] = None):
+        if agent_ids is not None:
+            self.agent_ids = agent_ids
+            self.num_agents = len(agent_ids)
+        self.reset_buffers()
+        self.current_goals = {
+            r: np.zeros(self.goal_dim, dtype=np.float32) for r in range(self.num_regions)
+        }
+
     def reset_buffers(self):
         self.worker_buffer = {
             aid: {
