@@ -215,4 +215,3 @@ The answer depends precisely on whether robustness is defined in **absolute** or
 - Canonical Phase 2 and Phase 3 result files remain untouched and uncorrupted.
 - Bootstrap confidence intervals were computed with resampling at the traffic base-seed level ($N=10$).
 - All code, scripts, and logs are archived in `experiments/phase2_v2noise_eval/`.
-
